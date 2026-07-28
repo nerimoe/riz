@@ -129,6 +129,7 @@ After=network.target
 Type=simple
 ExecStart=$BIN serve
 Environment=RIZ_HOME=$DATA_DIR
+Environment=PATH=$INSTALL_DIR:/usr/local/bin:/usr/bin:/bin
 Restart=on-failure
 RestartSec=3
 
@@ -159,7 +160,10 @@ install_macos_service() {
   <key>ProgramArguments</key>
   <array><string>$BIN</string><string>serve</string></array>
   <key>EnvironmentVariables</key>
-  <dict><key>RIZ_HOME</key><string>$DATA_DIR</string></dict>
+  <dict>
+    <key>RIZ_HOME</key><string>$DATA_DIR</string>
+    <key>PATH</key><string>$INSTALL_DIR:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+  </dict>
   <key>RunAtLoad</key><true/>
   <key>KeepAlive</key><true/>
   <key>StandardOutPath</key><string>$DATA_DIR/rizd.log</string>
