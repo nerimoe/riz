@@ -5,7 +5,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_markdown_plus/flutter_markdown_plus.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 import 'package:image_picker/image_picker.dart';
-import 'package:re_editor/re_editor.dart';
+import 'package:code_text_field/code_text_field.dart';
 import 'package:xterm/xterm.dart';
 
 import '../main.dart';
@@ -3330,7 +3330,7 @@ class _FilesPaneState extends ConsumerState<_FilesPane> {
   late String path;
   List<Map<String, dynamic>> entries = [];
   Map<String, dynamic>? opened;
-  CodeLineEditingController? editor;
+  CodeController? editor;
   final editorFocus = FocusNode(debugLabel: 'RizFileEditor');
   bool loading = true;
   bool dirty = false;
@@ -3386,7 +3386,7 @@ class _FilesPaneState extends ConsumerState<_FilesPane> {
       editor?.dispose();
       editor = value['text'] == null
           ? null
-          : CodeLineEditingController.fromText(value['text'] as String);
+          : CodeController(text: value['text'] as String);
       editor?.addListener(() {
         if (mounted) setState(() => dirty = true);
       });
@@ -3814,7 +3814,7 @@ class _FileEditor extends StatelessWidget {
     required this.onDiff,
   });
   final Map<String, dynamic> opened;
-  final CodeLineEditingController? editor;
+  final CodeController? editor;
   final bool dirty;
   final FocusNode focusNode;
   final VoidCallback onSave;
@@ -3864,12 +3864,12 @@ class _FileEditor extends StatelessWidget {
               ? Listener(
                   behavior: HitTestBehavior.opaque,
                   onPointerDown: (_) => focusNode.requestFocus(),
-                  child: CodeEditor(
-                    controller: editor,
+                  child: CodeField(
+                    controller: editor!,
                     focusNode: focusNode,
-                    autofocus: false,
                     padding: const EdgeInsets.all(12),
-                    wordWrap: false,
+                    expands: true,
+                    wrap: false,
                   ),
                 )
               : _EmptyState(
