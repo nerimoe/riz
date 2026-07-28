@@ -40,17 +40,19 @@ cat >"$linux/bin/systemctl" <<'EOF'
 echo "$*" >> "$HOME/systemctl.log"
 EOF
 chmod +x "$linux/bin/systemctl"
-HOME="$linux/home" PATH="$linux/bin:$PATH" \
+HOME="$linux/home" XDG_CONFIG_HOME="$linux/home/.config" PATH="$linux/bin:$PATH" \
   RIZ_DOWNLOAD_BASE="file://$linux/releases" \
   "$ROOT/install.sh" >"$linux/install.log"
 test -x "$linux/home/.local/bin/rizd"
 test -f "$linux/home/.config/systemd/user/rizd.service"
 grep -q 'enable --now rizd.service' "$linux/home/systemctl.log"
 grep -q 'Token: test-token' "$linux/install.log"
-HOME="$linux/home" PATH="$linux/bin:$PATH" "$ROOT/uninstall.sh"
+HOME="$linux/home" XDG_CONFIG_HOME="$linux/home/.config" PATH="$linux/bin:$PATH" \
+  "$ROOT/uninstall.sh"
 test ! -e "$linux/home/.local/bin/rizd"
 test -f "$linux/home/.riz/config.json"
-HOME="$linux/home" PATH="$linux/bin:$PATH" "$ROOT/uninstall.sh" --purge
+HOME="$linux/home" XDG_CONFIG_HOME="$linux/home/.config" PATH="$linux/bin:$PATH" \
+  "$ROOT/uninstall.sh" --purge
 test ! -e "$linux/home/.riz"
 cat >"$linux/bin/systemctl" <<'EOF'
 #!/bin/sh
@@ -58,7 +60,7 @@ if [ "${2:-}" = enable ]; then exit 1; fi
 exit 0
 EOF
 chmod +x "$linux/bin/systemctl"
-if HOME="$linux/home" PATH="$linux/bin:$PATH" \
+if HOME="$linux/home" XDG_CONFIG_HOME="$linux/home/.config" PATH="$linux/bin:$PATH" \
   RIZ_DOWNLOAD_BASE="file://$linux/releases" \
   "$ROOT/install.sh" >/dev/null 2>&1; then
   echo "installer unexpectedly succeeded with a failing systemd service" >&2
