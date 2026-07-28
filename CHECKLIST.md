@@ -1,5 +1,15 @@
 # Riz Completion Checklist
 
+## Automated Releases And Updates
+
+- [x] Public GitHub repository with Ubuntu-only CI runners
+- [x] Stable release when the workspace version exceeds the latest stable release
+- [x] Commit-suffixed prerelease for subsequent pushes at the same or lower version
+- [x] Linux x86_64 and ARM64 release assets with SHA-256 files
+- [x] Daemon stable/prerelease update checks through the authenticated WebSocket API
+- [x] Verified atomic daemon replacement and scheduled systemd/launchd restart
+- [x] Flutter settings controls for channel selection, update checks, and installation
+
 ## Current Domain Model Baseline (2026-07-28)
 
 This section supersedes older historical entries that mention primary folders,

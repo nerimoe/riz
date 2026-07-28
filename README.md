@@ -41,7 +41,7 @@ starts a user service with systemd on Linux or launchd on macOS. It supports:
 
 - `RIZ_VERSION=vX.Y.Z` to install a specific release.
 - `RIZ_REPO=owner/repository` to use another GitHub repository.
-- `RIZ_GITHUB_TOKEN` for private repositories.
+- `RIZ_GITHUB_TOKEN` for mirrors hosted in a private repository.
 - `RIZ_DOWNLOAD_BASE` for a release mirror or local test fixture.
 - `RIZ_LISTEN`, `RIZ_HOME`, and `RIZ_INSTALL_DIR` to override installation defaults.
 
@@ -50,6 +50,27 @@ your tunnel. Automatic GitHub releases currently contain Linux x86_64 and
 ARM64 binaries only. The macOS installer path is supported, but a matching
 `rizd-aarch64-apple-darwin` or `rizd-x86_64-apple-darwin` asset must be added to
 the release separately.
+
+The Settings view shows the running `rizd` version and can check either the
+stable or prerelease channel. An accepted update is downloaded from
+`nerimoe/riz`, verified against the release SHA-256 file, atomically replaces
+the running executable, and schedules the user service to restart. macOS will
+report that no compatible build is available until macOS assets are attached
+to a release.
+
+## Releases
+
+Every push to `main` runs the test suite on Ubuntu and builds Linux x86_64 and
+ARM64 daemon binaries. The workspace version in `Cargo.toml` is compared with
+the latest stable GitHub release:
+
+- A greater workspace version creates a stable `vX.Y.Z` release.
+- An equal or lower workspace version creates a prerelease named
+  `vX.Y.Z-<commit>`.
+
+Builds and releases do not use GitHub macOS runners. Re-running a workflow for
+the same commit replaces the assets on the existing release instead of
+creating a duplicate.
 
 Uninstall the service and binary while preserving data:
 

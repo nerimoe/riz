@@ -135,8 +135,11 @@ class DaemonClient {
         'payload': {'method': method, 'params': params},
       }),
     );
+    final timeout = method == 'daemon.update.install'
+        ? const Duration(minutes: 5)
+        : const Duration(seconds: 30);
     return completer.future.timeout(
-      const Duration(seconds: 30),
+      timeout,
       onTimeout: () {
         _pending.remove(id);
         throw TimeoutException(method);

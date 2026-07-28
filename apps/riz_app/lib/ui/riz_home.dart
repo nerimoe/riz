@@ -4465,15 +4465,137 @@ class _QuotaViewState extends ConsumerState<_QuotaView> {
   }
 }
 
-class _SettingsView extends ConsumerWidget {
+class _SettingsView extends ConsumerStatefulWidget {
   const _SettingsView();
+
   @override
-  Widget build(BuildContext context, WidgetRef ref) {
+  ConsumerState<_SettingsView> createState() => _SettingsViewState();
+}
+
+class _SettingsViewState extends ConsumerState<_SettingsView> {
+  String? _connectionId;
+  String _channel = 'stable';
+  Map<String, dynamic>? _updateStatus;
+  Map<String, dynamic>? _updateResult;
+  bool _checking = false;
+  bool _installing = false;
+
+  Future<void> _loadStatus(String connectionId) async {
+    try {
+      final value = await ref
+          .read(appControllerProvider.notifier)
+          .request('daemon.update.status');
+      if (!mounted || _connectionId != connectionId) return;
+      setState(() {
+        _updateStatus = value;
+        _channel = value['channel']?.toString() == 'prerelease'
+            ? 'prerelease'
+            : 'stable';
+      });
+    } catch (_) {}
+  }
+
+  Future<void> _checkUpdate([String? selectedChannel]) async {
+    final channel = selectedChannel ?? _channel;
+    setState(() {
+      _channel = channel;
+      _checking = true;
+      _updateResult = null;
+    });
+    try {
+      final value = await ref.read(appControllerProvider.notifier).request(
+        'daemon.update.check',
+        {'channel': channel},
+      );
+      if (!mounted) return;
+      setState(() {
+        _updateResult = value;
+        _updateStatus = {
+          ...?_updateStatus,
+          'currentVersion': value['currentVersion'],
+          'channel': channel,
+        };
+      });
+    } catch (error) {
+      if (mounted) {
+        ScaffoldMessenger.of(
+          context,
+        ).showSnackBar(SnackBar(content: Text(error.toString())));
+      }
+    } finally {
+      if (mounted) setState(() => _checking = false);
+    }
+  }
+
+  Future<void> _installUpdate() async {
+    final result = _updateResult;
+    if (result == null || result['available'] != true) return;
+    final accepted = await _confirm(
+      context,
+      tr(
+        context,
+        '更新 rizd 到 ${result['targetVersion']}？daemon 将自动重启，连接会短暂中断。',
+        'Update rizd to ${result['targetVersion']}? The daemon will restart and briefly disconnect.',
+      ),
+    );
+    if (!accepted || !mounted) return;
+    setState(() => _installing = true);
+    try {
+      final value = await ref.read(appControllerProvider.notifier).request(
+        'daemon.update.install',
+        {'channel': _channel},
+      );
+      if (!mounted) return;
+      setState(() => _updateResult = value);
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text(
+            value['restartScheduled'] == true
+                ? tr(
+                    context,
+                    '更新已安装，daemon 正在重启',
+                    'Update installed; daemon is restarting',
+                  )
+                : tr(
+                    context,
+                    '更新已安装，请手动重启 daemon',
+                    'Update installed; restart the daemon manually',
+                  ),
+          ),
+        ),
+      );
+    } catch (error) {
+      if (mounted) {
+        ScaffoldMessenger.of(
+          context,
+        ).showSnackBar(SnackBar(content: Text(error.toString())));
+      }
+    } finally {
+      if (mounted) setState(() => _installing = false);
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
     final state = ref.watch(appControllerProvider);
     final ctl = ref.read(appControllerProvider.notifier);
     final active = state.connections
         .where((c) => c.id == state.activeConnectionId)
         .firstOrNull;
+    if (_connectionId != active?.id) {
+      _connectionId = active?.id;
+      _updateStatus = null;
+      _updateResult = null;
+      if (active != null) {
+        WidgetsBinding.instance.addPostFrameCallback(
+          (_) => _loadStatus(active.id),
+        );
+      }
+    }
+    final currentVersion =
+        _updateStatus?['currentVersion']?.toString() ?? '...';
+    final available = _updateResult?['available'] == true;
+    final compatible = _updateResult?['compatible'] != false;
     return _PageFrame(
       title: tr(context, '设置', 'Settings'),
       child: ListView(
@@ -4518,6 +4640,95 @@ class _SettingsView extends ConsumerWidget {
             ),
           ),
           const Divider(),
+          if (active != null) ...[
+            ListTile(
+              leading: const Icon(Icons.system_update_alt),
+              title: Text(tr(context, 'rizd 更新', 'rizd updates')),
+              subtitle: Text(
+                '${tr(context, '当前版本', 'Current version')}: $currentVersion',
+              ),
+              trailing: DropdownButton<String>(
+                value: _channel,
+                onChanged: _checking || _installing
+                    ? null
+                    : (value) {
+                        if (value != null) _checkUpdate(value);
+                      },
+                items: [
+                  DropdownMenuItem(
+                    value: 'stable',
+                    child: Text(tr(context, '正式版', 'Release')),
+                  ),
+                  DropdownMenuItem(
+                    value: 'prerelease',
+                    child: Text(tr(context, '预发布版', 'Prerelease')),
+                  ),
+                ],
+              ),
+            ),
+            Padding(
+              padding: const EdgeInsets.fromLTRB(16, 0, 16, 12),
+              child: Wrap(
+                spacing: 8,
+                runSpacing: 8,
+                children: [
+                  OutlinedButton.icon(
+                    onPressed: _checking || _installing ? null : _checkUpdate,
+                    icon: _checking
+                        ? const SizedBox.square(
+                            dimension: 18,
+                            child: CircularProgressIndicator(strokeWidth: 2),
+                          )
+                        : const Icon(Icons.refresh),
+                    label: Text(tr(context, '检查更新', 'Check for updates')),
+                  ),
+                  FilledButton.icon(
+                    onPressed: available && compatible && !_installing
+                        ? _installUpdate
+                        : null,
+                    icon: _installing
+                        ? const SizedBox.square(
+                            dimension: 18,
+                            child: CircularProgressIndicator(strokeWidth: 2),
+                          )
+                        : const Icon(Icons.download),
+                    label: Text(tr(context, '更新 rizd', 'Update rizd')),
+                  ),
+                ],
+              ),
+            ),
+            if (_updateResult case final result?)
+              ListTile(
+                leading: Icon(
+                  !compatible
+                      ? Icons.warning_amber
+                      : available
+                      ? Icons.new_releases_outlined
+                      : Icons.check_circle_outline,
+                ),
+                title: Text(
+                  !compatible
+                      ? tr(
+                          context,
+                          '没有适用于此平台的构建',
+                          'No compatible build for this platform',
+                        )
+                      : available
+                      ? '${tr(context, '可更新到', 'Update available')}: ${result['targetVersion']}'
+                      : tr(
+                          context,
+                          '已经是所选通道的最新版本',
+                          'Up to date on this channel',
+                        ),
+                ),
+                subtitle: result['publishedAt'] == null
+                    ? null
+                    : Text(
+                        '${tr(context, '发布时间', 'Published')}: ${result['publishedAt']}',
+                      ),
+              ),
+            const Divider(),
+          ],
           if (active != null)
             ListTile(
               leading: const Icon(Icons.dns_outlined),

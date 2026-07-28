@@ -17,6 +17,7 @@ mime_guess.workspace = true
 portable-pty.workspace = true
 rand.workspace = true
 regex.workspace = true
+reqwest.workspace = true
 riz_protocol = { path = "../riz_protocol" }
 rusqlite.workspace = true
 serde.workspace = true

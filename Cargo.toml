@@ -6,7 +6,7 @@ resolver = "2"
 version = "0.1.0"
 edition = "2024"
 license = "Apache-2.0"
-repository = "https://github.com/riz-remote/riz"
+repository = "https://github.com/nerimoe/riz"
 
 [workspace.dependencies]
 anyhow = "1.0"
@@ -21,6 +21,7 @@ mime_guess = "2.0"
 portable-pty = "0.9"
 rand = "0.9"
 regex = "1.12"
+reqwest = { version = "0.13", default-features = false, features = ["json", "rustls"] }
 rusqlite = { version = "0.38", features = ["bundled", "chrono"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"

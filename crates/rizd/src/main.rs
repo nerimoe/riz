@@ -1,3 +1,4 @@
+mod build_version;
 mod config;
 mod db;
 mod files;
@@ -6,6 +7,7 @@ mod server;
 mod skills;
 mod state;
 mod terminal;
+mod updater;
 
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};

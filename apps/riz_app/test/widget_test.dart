@@ -186,6 +186,32 @@ class _ConnectedUnboundSessionController extends _UnboundSessionController {
   );
 }
 
+class _SettingsController extends _EmptyProjectController {
+  @override
+  RizState build() => super.build().copyWith(navigationIndex: 3);
+
+  @override
+  Future<Map<String, dynamic>> request(
+    String method, [
+    Map<String, dynamic> params = const {},
+  ]) async => switch (method) {
+    'daemon.update.status' => {
+      'currentVersion': '0.1.0',
+      'channel': 'stable',
+      'repository': 'nerimoe/riz',
+    },
+    'daemon.update.check' => {
+      'currentVersion': '0.1.0',
+      'targetVersion': '0.1.1',
+      'channel': params['channel'],
+      'available': true,
+      'compatible': true,
+      'publishedAt': '2026-07-28T00:00:00Z',
+    },
+    _ => throw StateError('unexpected request: $method'),
+  };
+}
+
 void main() {
   test('state preserves the daemon-project-session hierarchy', () {
     final state = RizState(
@@ -423,6 +449,38 @@ void main() {
     expect(find.byType(NavigationRail), findsNothing);
     expect(find.byType(NavigationBar), findsNothing);
     expect(tester.widget<Scaffold>(find.byType(Scaffold)).drawer, isNotNull);
+    expect(tester.takeException(), isNull);
+  });
+
+  testWidgets('phone settings checks and presents daemon updates', (
+    tester,
+  ) async {
+    tester.view.devicePixelRatio = 1;
+    tester.view.physicalSize = const Size(390, 844);
+    addTearDown(tester.view.resetDevicePixelRatio);
+    addTearDown(tester.view.resetPhysicalSize);
+    await tester.pumpWidget(
+      ProviderScope(
+        overrides: [
+          appControllerProvider.overrideWith(_SettingsController.new),
+        ],
+        child: const MaterialApp(home: RizHome()),
+      ),
+    );
+    await tester.pump();
+
+    expect(find.text('Current version: 0.1.0'), findsOneWidget);
+    await tester.tap(find.widgetWithText(OutlinedButton, 'Check for updates'));
+    await tester.pump();
+    expect(find.text('Update available: 0.1.1'), findsOneWidget);
+    expect(
+      tester
+          .widget<FilledButton>(
+            find.widgetWithText(FilledButton, 'Update rizd'),
+          )
+          .onPressed,
+      isNotNull,
+    );
     expect(tester.takeException(), isNull);
   });
 

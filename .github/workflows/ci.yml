@@ -7,6 +7,10 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  group: riz-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   rust:
     runs-on: ubuntu-latest
@@ -20,6 +24,7 @@ jobs:
       - run: cargo clippy --workspace --all-targets -- -D warnings
       - run: cargo test --workspace
       - run: sh scripts/test-install.sh
+      - run: sh scripts/test-release-plan.sh
 
   flutter:
     runs-on: ubuntu-latest
@@ -40,10 +45,33 @@ jobs:
       - run: flutter build web --release
       - run: flutter build apk --debug
 
-  daemon-release:
-    if: startsWith(github.ref, 'refs/tags/v')
+  release-plan:
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    needs: rust
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.plan.outputs.version }}
+      tag: ${{ steps.plan.outputs.tag }}
+      prerelease: ${{ steps.plan.outputs.prerelease }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: plan
+        name: Select stable or prerelease version
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          cargo_version=$(awk -F '"' '/^version = "/ { print $2; exit }' Cargo.toml)
+          latest_tag=$(gh api "repos/${GITHUB_REPOSITORY}/releases/latest" --jq .tag_name 2>/dev/null || true)
+          latest_version=${latest_tag#v}
+          latest_version=${latest_version:-0.0.0}
+          sh scripts/release-plan.sh "$cargo_version" "$latest_version" "$GITHUB_SHA" | tee -a "$GITHUB_OUTPUT"
+
+  daemon-build:
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    needs: [release-plan, flutter]
     permissions:
-      contents: write
+      contents: read
     strategy:
       matrix:
         include:
@@ -53,6 +81,11 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
+      - name: Embed release version
+        env:
+          VERSION: ${{ needs.release-plan.outputs.version }}
+        run: |
+          printf 'pub const BUILD_VERSION: &str = "%s";\n' "$VERSION" > crates/rizd/src/build_version.rs
       - name: Build Linux daemon
         uses: houseabsolute/actions-rust-cross@v1
         with:
@@ -63,8 +96,47 @@ jobs:
       - run: |
           cp target/${{ matrix.target }}/release/rizd rizd-${{ matrix.target }}
           sha256sum rizd-${{ matrix.target }} > rizd-${{ matrix.target }}.sha256
-      - uses: softprops/action-gh-release@v2
+      - uses: actions/upload-artifact@v4
         with:
-          files: |
+          name: daemon-${{ matrix.target }}
+          path: |
             rizd-${{ matrix.target }}
             rizd-${{ matrix.target }}.sha256
+
+  daemon-release:
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    needs: [release-plan, daemon-build]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: daemon-*
+          path: release
+          merge-multiple: true
+      - name: Publish GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ needs.release-plan.outputs.tag }}
+          VERSION: ${{ needs.release-plan.outputs.version }}
+          PRERELEASE: ${{ needs.release-plan.outputs.prerelease }}
+        run: |
+          set -euo pipefail
+          if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release upload "$TAG" release/* --clobber --repo "$GITHUB_REPOSITORY"
+          elif [ "$PRERELEASE" = true ]; then
+            gh release create "$TAG" release/* \
+              --repo "$GITHUB_REPOSITORY" \
+              --target "$GITHUB_SHA" \
+              --title "Riz $VERSION" \
+              --notes "Automated prerelease for commit $GITHUB_SHA." \
+              --prerelease
+          else
+            gh release create "$TAG" release/* \
+              --repo "$GITHUB_REPOSITORY" \
+              --target "$GITHUB_SHA" \
+              --title "Riz $VERSION" \
+              --generate-notes \
+              --latest
+          fi

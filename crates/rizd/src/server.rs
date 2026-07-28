@@ -4,6 +4,7 @@ use crate::{
     provider::{AgentProvider, PromptRequest, ProviderRuntimeEvent},
     skills,
     state::{AppState, Outbound, UploadTransfer},
+    updater::{self, UpdateChannel},
 };
 use anyhow::{Context, Result, bail};
 use axum::{
@@ -103,7 +104,7 @@ async fn client_inner(mut socket: WebSocket, state: AppState) -> Result<()> {
     let hello = Envelope::response(
         &envelope,
         state.daemon_id(),
-        json!({"kind":"hello","daemon":{"id":state.daemon_id(),"name":state.config.name},"protocolVersion":PROTOCOL_VERSION,"providers":[detected]}),
+        json!({"kind":"hello","daemon":{"id":state.daemon_id(),"name":state.config.name,"version":updater::current_version()},"protocolVersion":PROTOCOL_VERSION,"providers":[detected]}),
     );
     socket
         .send(Message::Text(serde_json::to_string(&hello)?.into()))
@@ -160,7 +161,32 @@ async fn dispatch(state: &AppState, request: &Envelope) -> Result<Value> {
             "architecture": std::env::consts::ARCH,
             "daemonId": state.daemon_id(),
             "provider": state.agy.detect(),
+            "version": updater::current_version(),
+            "updateChannel": updater::configured_channel(),
         })),
+        "daemon.update.status" => Ok(updater::status()),
+        "daemon.update.check" => {
+            let channel = UpdateChannel::parse(p["channel"].as_str().unwrap_or(
+                match updater::configured_channel() {
+                    UpdateChannel::Stable => "stable",
+                    UpdateChannel::Prerelease => "prerelease",
+                },
+            ))?;
+            Ok(serde_json::to_value(updater::check(channel).await?)?)
+        }
+        "daemon.update.install" => {
+            let channel = UpdateChannel::parse(p["channel"].as_str().unwrap_or(
+                match updater::configured_channel() {
+                    UpdateChannel::Stable => "stable",
+                    UpdateChannel::Prerelease => "prerelease",
+                },
+            ))?;
+            let update = updater::install(channel).await?;
+            let restart_scheduled = update.is_available() && updater::schedule_restart()?;
+            let mut response = serde_json::to_value(update)?;
+            response["restartScheduled"] = json!(restart_scheduled);
+            Ok(response)
+        }
         "snapshot.get" => state.db.snapshot(),
         "events.get" => Ok(
             json!({"events":state.db.events_after(p["afterSeq"].as_i64().unwrap_or(0),p["limit"].as_i64().unwrap_or(500).clamp(1,1000))?}),
@@ -1361,6 +1387,25 @@ mod tests {
         let second_event = receive_event(&mut second, "project.changed").await;
         assert_eq!(first_event.seq, second_event.seq);
         assert_eq!(first_event.payload["data"]["name"], "Shared event");
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn websocket_reports_daemon_update_status() {
+        let (_directory, url, server) = test_server(0).await;
+        let (mut client, _) = connect_async(url).await.unwrap();
+        client.send(auth("secret", 0)).await.unwrap();
+        assert_eq!(receive(&mut client).await.payload["kind"], "hello");
+        client
+            .send(request("update-status", "daemon.update.status", json!({})))
+            .await
+            .unwrap();
+        let response = receive_response(&mut client, "update-status").await;
+        assert_eq!(response.payload["repository"], "nerimoe/riz");
+        assert_eq!(
+            response.payload["currentVersion"],
+            env!("CARGO_PKG_VERSION")
+        );
         server.abort();
     }
 
