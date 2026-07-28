@@ -171,8 +171,10 @@ class _Shell extends ConsumerWidget {
         ),
         actions: [
           IconButton(
-            tooltip: tr(context, '刷新', 'Refresh'),
-            onPressed: controller.refresh,
+            tooltip: state.connected
+                ? tr(context, '刷新', 'Refresh')
+                : tr(context, '重新连接', 'Reconnect'),
+            onPressed: controller.refreshOrReconnect,
             icon: Icon(
               state.connected
                   ? Icons.cloud_done_outlined
@@ -668,8 +670,10 @@ class _ProjectTreeSidebar extends ConsumerWidget {
                 const SizedBox(width: 12),
                 Expanded(child: _DaemonPicker(state: state)),
                 IconButton(
-                  tooltip: tr(context, '刷新', 'Refresh'),
-                  onPressed: ctl.refresh,
+                  tooltip: state.connected
+                      ? tr(context, '刷新', 'Refresh')
+                      : tr(context, '重新连接', 'Reconnect'),
+                  onPressed: ctl.refreshOrReconnect,
                   icon: Icon(
                     state.connected
                         ? Icons.cloud_done_outlined

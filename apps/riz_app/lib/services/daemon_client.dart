@@ -46,18 +46,24 @@ class DaemonClient {
   StreamSubscription? _subscription;
   final _pending = <String, Completer<Map<String, dynamic>>>{};
   final _downloads = <String, _DownloadTransfer>{};
+  int _generation = 0;
   int lastSeq = 0;
 
   Future<void> connect() async {
     await close();
+    final generation = ++_generation;
     try {
       final channel = WebSocketChannel.connect(Uri.parse(url));
       await channel.ready;
+      if (generation != _generation) {
+        await channel.sink.close();
+        return;
+      }
       _channel = channel;
       _subscription = channel.stream.listen(
         _onData,
-        onError: (Object e) => _disconnected(e.toString()),
-        onDone: () => _disconnected('Connection closed'),
+        onError: (Object e) => _disconnected(e.toString(), generation),
+        onDone: () => _disconnected('Connection closed', generation),
       );
       channel.sink.add(
         jsonEncode({
@@ -197,7 +203,13 @@ class DaemonClient {
     _channel?.sink.add(frame.toBytes());
   }
 
-  void _disconnected(String error) {
+  void _disconnected(String error, int generation) {
+    if (generation != _generation) return;
+    _generation++;
+    final subscription = _subscription;
+    _subscription = null;
+    _channel = null;
+    if (subscription != null) unawaited(subscription.cancel());
     onStatus(false, error);
     for (final value in _pending.values) {
       if (!value.isCompleted) value.completeError(StateError(error));
@@ -212,9 +224,14 @@ class DaemonClient {
   }
 
   Future<void> close() async {
-    await _subscription?.cancel();
-    await _channel?.sink.close();
+    _generation++;
+    final subscription = _subscription;
+    final channel = _channel;
     _subscription = null;
     _channel = null;
+    await subscription?.cancel();
+    try {
+      await channel?.sink.close().timeout(const Duration(seconds: 2));
+    } catch (_) {}
   }
 }

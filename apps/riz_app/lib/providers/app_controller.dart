@@ -160,6 +160,27 @@ class AppController extends Notifier<RizState> {
     }
   }
 
+  Future<void> refreshOrReconnect() async {
+    if (state.connected) {
+      await refresh();
+      return;
+    }
+    final id = state.activeConnectionId;
+    if (id == null) return;
+    _reconnectTimers.remove(id)?.cancel();
+    final daemon = _clients[id];
+    if (daemon == null) {
+      final connection = state.connections.where((item) => item.id == id).first;
+      await _connectOne(connection);
+      return;
+    }
+    try {
+      await daemon.connect();
+    } catch (error) {
+      state = state.copyWith(error: error.toString());
+    }
+  }
+
   Future<void> addConnection({
     required String name,
     required String url,
