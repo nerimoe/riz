@@ -32,6 +32,27 @@ class RizSettings {
   );
 }
 
+class ConnectionLogEntry {
+  const ConnectionLogEntry({
+    required this.timestamp,
+    required this.connectionId,
+    required this.level,
+    required this.event,
+    this.detail,
+  });
+
+  final DateTime timestamp;
+  final String connectionId;
+  final String level;
+  final String event;
+  final String? detail;
+
+  String get copyText {
+    final suffix = detail == null || detail!.isEmpty ? '' : ' - $detail';
+    return '${timestamp.toIso8601String()} [$level] $connectionId $event$suffix';
+  }
+}
+
 class RizState {
   const RizState({
     this.loading = true,
@@ -50,6 +71,7 @@ class RizState {
     this.settings = const RizSettings(),
     this.navigationIndex = 0,
     this.daemonStatuses = const {},
+    this.connectionLogs = const [],
   });
   final bool loading;
   final List<DaemonConnection> connections;
@@ -67,6 +89,7 @@ class RizState {
   final RizSettings settings;
   final int navigationIndex;
   final Map<String, bool> daemonStatuses;
+  final List<ConnectionLogEntry> connectionLogs;
 
   List<Map<String, dynamic>> get allProjects =>
       (snapshot['projects'] as List? ?? const [])
@@ -114,6 +137,7 @@ class RizState {
     RizSettings? settings,
     int? navigationIndex,
     Map<String, bool>? daemonStatuses,
+    List<ConnectionLogEntry>? connectionLogs,
   }) => RizState(
     loading: loading ?? this.loading,
     connections: connections ?? this.connections,
@@ -139,6 +163,7 @@ class RizState {
     settings: settings ?? this.settings,
     navigationIndex: navigationIndex ?? this.navigationIndex,
     daemonStatuses: daemonStatuses ?? this.daemonStatuses,
+    connectionLogs: connectionLogs ?? this.connectionLogs,
   );
 }
 

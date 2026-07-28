@@ -2,6 +2,7 @@ import 'dart:convert';
 
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_markdown_plus/flutter_markdown_plus.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 import 'package:image_picker/image_picker.dart';
@@ -4809,13 +4810,257 @@ class _SettingsViewState extends ConsumerState<_SettingsView> {
               ),
             ),
           ),
-          if (state.error != null)
-            ListTile(
-              leading: Icon(Icons.error_outline, color: context.colors.error),
-              title: Text(tr(context, '连接诊断', 'Connection diagnostics')),
-              subtitle: SelectableText(state.error!),
+          ListTile(
+            leading: Icon(
+              state.connected
+                  ? Icons.monitor_heart_outlined
+                  : Icons.error_outline,
+              color: state.connected ? null : context.colors.error,
             ),
+            title: Text(tr(context, '连接诊断', 'Connection diagnostics')),
+            subtitle: Text(
+              state.error ??
+                  (state.connected
+                      ? tr(
+                          context,
+                          '已连接 · ${state.connectionLogs.length} 条日志',
+                          'Connected · ${state.connectionLogs.length} log entries',
+                        )
+                      : tr(
+                          context,
+                          '未连接 · ${state.connectionLogs.length} 条日志',
+                          'Disconnected · ${state.connectionLogs.length} log entries',
+                        )),
+              maxLines: 2,
+              overflow: TextOverflow.ellipsis,
+            ),
+            trailing: const Icon(Icons.chevron_right),
+            onTap: () => showDialog<void>(
+              context: context,
+              builder: (_) => const _ConnectionDiagnosticsDialog(),
+            ),
+          ),
         ],
+      ),
+    );
+  }
+}
+
+class _ConnectionDiagnosticsDialog extends ConsumerWidget {
+  const _ConnectionDiagnosticsDialog();
+
+  String _time(DateTime value) {
+    String two(int number) => number.toString().padLeft(2, '0');
+    String three(int number) => number.toString().padLeft(3, '0');
+    return '${two(value.hour)}:${two(value.minute)}:${two(value.second)}.${three(value.millisecond)}';
+  }
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final state = ref.watch(appControllerProvider);
+    final controller = ref.read(appControllerProvider.notifier);
+    final active = state.connections
+        .where((connection) => connection.id == state.activeConnectionId)
+        .firstOrNull;
+    final logs = state.connectionLogs.reversed.toList();
+    final screen = MediaQuery.sizeOf(context);
+
+    return Dialog(
+      insetPadding: EdgeInsets.all(screen.width < 600 ? 12 : 24),
+      child: ConstrainedBox(
+        constraints: BoxConstraints(
+          maxWidth: 760,
+          maxHeight: screen.height * .86,
+        ),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Padding(
+              padding: const EdgeInsets.fromLTRB(20, 16, 8, 12),
+              child: Row(
+                children: [
+                  Icon(
+                    state.connected
+                        ? Icons.monitor_heart_outlined
+                        : Icons.error_outline,
+                    color: state.connected ? null : context.colors.error,
+                  ),
+                  const SizedBox(width: 12),
+                  Expanded(
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Text(
+                          tr(context, '连接诊断', 'Connection diagnostics'),
+                          style: context.text.titleMedium,
+                        ),
+                        Text(
+                          '${active?.name ?? '-'} · ${state.connected ? tr(context, '已连接', 'Connected') : tr(context, '未连接', 'Disconnected')}',
+                          style: context.text.bodySmall,
+                        ),
+                      ],
+                    ),
+                  ),
+                  IconButton(
+                    tooltip: tr(context, '关闭', 'Close'),
+                    onPressed: () => Navigator.pop(context),
+                    icon: const Icon(Icons.close),
+                  ),
+                ],
+              ),
+            ),
+            const Divider(height: 1),
+            Padding(
+              padding: const EdgeInsets.fromLTRB(20, 12, 20, 12),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.stretch,
+                children: [
+                  Text(
+                    active?.url ??
+                        tr(context, '没有活动连接', 'No active connection'),
+                    style: context.text.bodySmall?.copyWith(
+                      fontFamily: 'monospace',
+                    ),
+                  ),
+                  if (state.error case final error?) ...[
+                    const SizedBox(height: 6),
+                    Text(
+                      error,
+                      style: context.text.bodySmall?.copyWith(
+                        color: context.colors.error,
+                      ),
+                    ),
+                  ],
+                ],
+              ),
+            ),
+            const Divider(height: 1),
+            Flexible(
+              child: logs.isEmpty
+                  ? _EmptyState(
+                      icon: Icons.receipt_long_outlined,
+                      label: tr(context, '还没有连接日志', 'No connection logs yet'),
+                    )
+                  : SelectionArea(
+                      child: ListView.separated(
+                        padding: const EdgeInsets.symmetric(vertical: 8),
+                        itemCount: logs.length,
+                        separatorBuilder: (_, _) => const Divider(height: 1),
+                        itemBuilder: (context, index) {
+                          final entry = logs[index];
+                          final color = switch (entry.level) {
+                            'error' => context.colors.error,
+                            'warning' => context.colors.tertiary,
+                            _ => context.colors.primary,
+                          };
+                          return Padding(
+                            padding: const EdgeInsets.symmetric(
+                              horizontal: 20,
+                              vertical: 9,
+                            ),
+                            child: Row(
+                              crossAxisAlignment: CrossAxisAlignment.start,
+                              children: [
+                                Container(
+                                  width: 7,
+                                  height: 7,
+                                  margin: const EdgeInsets.only(top: 6),
+                                  decoration: BoxDecoration(
+                                    color: color,
+                                    shape: BoxShape.circle,
+                                  ),
+                                ),
+                                const SizedBox(width: 10),
+                                SizedBox(
+                                  width: 88,
+                                  child: Text(
+                                    _time(entry.timestamp),
+                                    style: context.text.bodySmall?.copyWith(
+                                      fontFamily: 'monospace',
+                                    ),
+                                  ),
+                                ),
+                                Expanded(
+                                  child: Column(
+                                    crossAxisAlignment:
+                                        CrossAxisAlignment.start,
+                                    children: [
+                                      Text(
+                                        entry.event,
+                                        style: context.text.bodyMedium
+                                            ?.copyWith(
+                                              fontFamily: 'monospace',
+                                              fontWeight: FontWeight.w600,
+                                            ),
+                                      ),
+                                      if (entry.detail case final detail?)
+                                        Padding(
+                                          padding: const EdgeInsets.only(
+                                            top: 2,
+                                          ),
+                                          child: Text(
+                                            detail,
+                                            style: context.text.bodySmall
+                                                ?.copyWith(
+                                                  fontFamily: 'monospace',
+                                                ),
+                                          ),
+                                        ),
+                                    ],
+                                  ),
+                                ),
+                              ],
+                            ),
+                          );
+                        },
+                      ),
+                    ),
+            ),
+            const Divider(height: 1),
+            Padding(
+              padding: const EdgeInsets.all(12),
+              child: Row(
+                children: [
+                  TextButton.icon(
+                    onPressed: logs.isEmpty
+                        ? null
+                        : controller.clearConnectionLogs,
+                    icon: const Icon(Icons.delete_sweep_outlined),
+                    label: Text(tr(context, '清空', 'Clear')),
+                  ),
+                  const Spacer(),
+                  OutlinedButton.icon(
+                    onPressed: logs.isEmpty
+                        ? null
+                        : () async {
+                            await Clipboard.setData(
+                              ClipboardData(
+                                text: state.connectionLogs
+                                    .map((entry) => entry.copyText)
+                                    .join('\n'),
+                              ),
+                            );
+                            if (!context.mounted) return;
+                            ScaffoldMessenger.of(context).showSnackBar(
+                              SnackBar(
+                                content: Text(
+                                  tr(
+                                    context,
+                                    '诊断日志已复制',
+                                    'Diagnostic log copied',
+                                  ),
+                                ),
+                              ),
+                            );
+                          },
+                    icon: const Icon(Icons.copy_all_outlined),
+                    label: Text(tr(context, '复制日志', 'Copy log')),
+                  ),
+                ],
+              ),
+            ),
+          ],
+        ),
       ),
     );
   }

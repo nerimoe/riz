@@ -79,7 +79,16 @@ class AppController extends Notifier<RizState> {
 
   Future<void> _connectOne(DaemonConnection connection) async {
     final token = await _secure.read(key: 'riz.token.${connection.id}');
-    if (token == null) return;
+    if (token == null) {
+      _connectionLog(
+        connection.id,
+        'token.missing',
+        'error',
+        'No saved bearer token',
+      );
+      return;
+    }
+    _connectionLog(connection.id, 'client.create', 'info', connection.url);
     late final DaemonClient daemon;
     daemon = DaemonClient(
       url: connection.url,
@@ -89,6 +98,12 @@ class AppController extends Notifier<RizState> {
         if (channel == 3) _terminalListeners[id]?.call(data);
       },
       onStatus: (connected, error) {
+        _connectionLog(
+          connection.id,
+          connected ? 'status.connected' : 'status.disconnected',
+          connected ? 'info' : 'warning',
+          error,
+        );
         if (connected) {
           _reconnectTimers.remove(connection.id)?.cancel();
         } else if (_clients[connection.id] == daemon &&
@@ -98,11 +113,23 @@ class AppController extends Notifier<RizState> {
             () async {
               _reconnectTimers.remove(connection.id);
               if (_clients[connection.id] == daemon) {
+                _connectionLog(
+                  connection.id,
+                  'reconnect.attempt',
+                  'info',
+                  connection.url,
+                );
                 try {
                   await daemon.connect();
                 } catch (_) {}
               }
             },
+          );
+          _connectionLog(
+            connection.id,
+            'reconnect.scheduled',
+            'info',
+            'retry in 3 seconds',
           );
         }
         final statuses = {...state.daemonStatuses, connection.id: connected};
@@ -120,6 +147,8 @@ class AppController extends Notifier<RizState> {
           unawaited(refresh());
         }
       },
+      onDebug: (event, level, detail) =>
+          _connectionLog(connection.id, event, level, detail),
     );
     _clients[connection.id] = daemon;
     try {
@@ -167,6 +196,7 @@ class AppController extends Notifier<RizState> {
     }
     final id = state.activeConnectionId;
     if (id == null) return;
+    _connectionLog(id, 'reconnect.manual', 'info', null);
     _reconnectTimers.remove(id)?.cancel();
     final daemon = _clients[id];
     if (daemon == null) {
@@ -179,6 +209,33 @@ class AppController extends Notifier<RizState> {
     } catch (error) {
       state = state.copyWith(error: error.toString());
     }
+  }
+
+  void _connectionLog(
+    String connectionId,
+    String event,
+    String level,
+    String? detail,
+  ) {
+    final entries = [
+      ...state.connectionLogs,
+      ConnectionLogEntry(
+        timestamp: DateTime.now(),
+        connectionId: connectionId,
+        level: level,
+        event: event,
+        detail: detail,
+      ),
+    ];
+    state = state.copyWith(
+      connectionLogs: entries.length > 200
+          ? entries.sublist(entries.length - 200)
+          : entries,
+    );
+  }
+
+  void clearConnectionLogs() {
+    state = state.copyWith(connectionLogs: const []);
   }
 
   Future<void> addConnection({

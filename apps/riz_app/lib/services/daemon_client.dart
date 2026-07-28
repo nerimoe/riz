@@ -7,6 +7,8 @@ import 'package:web_socket_channel/web_socket_channel.dart';
 
 typedef EventHandler = void Function(String topic, dynamic data, int? seq);
 typedef BinaryHandler = void Function(int channel, String id, Uint8List data);
+typedef DebugHandler =
+    void Function(String event, String level, String? detail);
 
 class _DownloadTransfer {
   final bytes = BytesBuilder(copy: false);
@@ -36,12 +38,14 @@ class DaemonClient {
     required this.onEvent,
     required this.onBinary,
     required this.onStatus,
+    this.onDebug,
   });
   final String url;
   final String token;
   final EventHandler onEvent;
   final BinaryHandler onBinary;
   final void Function(bool connected, String? error) onStatus;
+  final DebugHandler? onDebug;
   WebSocketChannel? _channel;
   StreamSubscription? _subscription;
   final _pending = <String, Completer<Map<String, dynamic>>>{};
@@ -50,11 +54,13 @@ class DaemonClient {
   int lastSeq = 0;
 
   Future<void> connect() async {
+    _debug('connect.start', detail: url);
     await close();
     final generation = ++_generation;
     try {
       final channel = WebSocketChannel.connect(Uri.parse(url));
       await channel.ready;
+      _debug('socket.ready');
       if (generation != _generation) {
         await channel.sink.close();
         return;
@@ -62,8 +68,14 @@ class DaemonClient {
       _channel = channel;
       _subscription = channel.stream.listen(
         _onData,
-        onError: (Object e) => _disconnected(e.toString(), generation),
-        onDone: () => _disconnected('Connection closed', generation),
+        onError: (Object e) {
+          _debug('socket.error', level: 'error', detail: e.toString());
+          _disconnected(e.toString(), generation);
+        },
+        onDone: () {
+          _debug('socket.done', level: 'warning', detail: 'Connection closed');
+          _disconnected('Connection closed', generation);
+        },
       );
       channel.sink.add(
         jsonEncode({
@@ -73,7 +85,9 @@ class DaemonClient {
           'payload': {'token': token, 'lastSeq': lastSeq},
         }),
       );
+      _debug('auth.sent', detail: 'lastSeq=$lastSeq');
     } catch (e) {
+      _debug('connect.failed', level: 'error', detail: e.toString());
       onStatus(false, e.toString());
       rethrow;
     }
@@ -104,14 +118,25 @@ class DaemonClient {
           .remove(id)
           ?.completeError(Exception((envelope['error'] as Map)['message']));
       if (id == 'auth') {
-        onStatus(false, (envelope['error'] as Map)['message'] as String?);
+        final message = (envelope['error'] as Map)['message'] as String?;
+        _debug('auth.failed', level: 'error', detail: message);
+        onStatus(false, message);
       }
       return;
     }
     if (envelope['type'] == 'response') {
       final payload = (envelope['payload'] as Map? ?? const {})
           .cast<String, dynamic>();
-      if (payload['kind'] == 'hello') onStatus(true, null);
+      if (payload['kind'] == 'hello') {
+        _debug(
+          'hello.received',
+          detail: [
+            payload['daemonName'],
+            payload['daemonVersion'],
+          ].whereType<Object>().join(' '),
+        );
+        onStatus(true, null);
+      }
       _pending.remove(envelope['requestId'])?.complete(payload);
     } else if (envelope['type'] == 'event') {
       lastSeq = envelope['seq'] as int? ?? lastSeq;
@@ -221,6 +246,10 @@ class DaemonClient {
       }
     }
     _downloads.clear();
+  }
+
+  void _debug(String event, {String level = 'info', String? detail}) {
+    onDebug?.call(event, level, detail);
   }
 
   Future<void> close() async {

@@ -188,7 +188,21 @@ class _ConnectedUnboundSessionController extends _UnboundSessionController {
 
 class _SettingsController extends _EmptyProjectController {
   @override
-  RizState build() => super.build().copyWith(navigationIndex: 3);
+  RizState build() => super.build().copyWith(
+    navigationIndex: 3,
+    connected: false,
+    error: 'WebSocketException: handshake failed',
+    daemonStatuses: const {'d1': false},
+    connectionLogs: [
+      ConnectionLogEntry(
+        timestamp: DateTime(2026, 7, 28, 17, 4, 3, 12),
+        connectionId: 'd1',
+        level: 'error',
+        event: 'connect.failed',
+        detail: 'WebSocketException: handshake failed',
+      ),
+    ],
+  );
 
   @override
   Future<Map<String, dynamic>> request(
@@ -481,6 +495,44 @@ void main() {
           .onPressed,
       isNotNull,
     );
+    expect(tester.takeException(), isNull);
+  });
+
+  testWidgets('phone settings opens and clears connection diagnostics', (
+    tester,
+  ) async {
+    tester.view.devicePixelRatio = 1;
+    tester.view.physicalSize = const Size(390, 844);
+    addTearDown(tester.view.resetDevicePixelRatio);
+    addTearDown(tester.view.resetPhysicalSize);
+    await tester.pumpWidget(
+      ProviderScope(
+        overrides: [
+          appControllerProvider.overrideWith(_SettingsController.new),
+        ],
+        child: const MaterialApp(home: RizHome()),
+      ),
+    );
+    await tester.pump();
+
+    final diagnostics = find.text('Connection diagnostics');
+    await tester.scrollUntilVisible(
+      diagnostics,
+      240,
+      scrollable: find.byType(Scrollable).last,
+    );
+    await tester.tap(diagnostics);
+    await tester.pumpAndSettle();
+
+    expect(find.text('connect.failed'), findsOneWidget);
+    expect(
+      find.text('WebSocketException: handshake failed'),
+      findsAtLeastNWidgets(1),
+    );
+    expect(find.widgetWithText(OutlinedButton, 'Copy log'), findsOneWidget);
+    await tester.tap(find.widgetWithText(TextButton, 'Clear'));
+    await tester.pump();
+    expect(find.text('No connection logs yet'), findsOneWidget);
     expect(tester.takeException(), isNull);
   });
 
