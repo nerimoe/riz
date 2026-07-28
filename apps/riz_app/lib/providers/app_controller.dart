@@ -243,6 +243,8 @@ class AppController extends Notifier<RizState> {
     required String url,
     required String token,
   }) async {
+    final normalizedToken = token.trim();
+    if (normalizedToken.isEmpty) throw ArgumentError('Token cannot be empty');
     final normalized = normalizeDaemonUrl(
       url,
       requireSecureWebSocket: kIsWeb && Uri.base.scheme == 'https',
@@ -253,7 +255,10 @@ class AppController extends Notifier<RizState> {
       url: normalized,
     );
     final connections = [...state.connections, connection];
-    await _secure.write(key: 'riz.token.${connection.id}', value: token);
+    await _secure.write(
+      key: 'riz.token.${connection.id}',
+      value: normalizedToken,
+    );
     await _saveConnections(connections, connection.id);
     state = state.copyWith(
       connections: connections,

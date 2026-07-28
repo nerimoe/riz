@@ -140,12 +140,17 @@ async fn client_inner(mut socket: WebSocket, state: AppState) -> Result<()> {
     }
     let (mut tx, mut rx) = socket.split();
     let mut pushes = state.outbound.subscribe();
+    let mut heartbeat = tokio::time::interval(Duration::from_secs(10));
+    heartbeat.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    heartbeat.tick().await;
     loop {
         tokio::select! {
             incoming=rx.next()=>{let Some(incoming)=incoming else{break};match incoming?{Message::Text(text)=>{let request=match serde_json::from_str::<Envelope>(&text){Ok(v)=>v,Err(e)=>{tracing::debug!(%e,"invalid envelope");continue}};let response=match dispatch(&state,&request).await{Ok(v)=>Envelope::response(&request,state.daemon_id(),v),Err(e)=>Envelope::failure(&request,state.daemon_id(),"request_failed",e.to_string())};tx.send(Message::Text(serde_json::to_string(&response)?.into())).await?;}Message::Binary(frame)=>handle_binary(&state,&frame)?,Message::Close(_)=>break,Message::Ping(v)=>tx.send(Message::Pong(v)).await?,_=>{}}}
-            push=pushes.recv()=>match push{Ok(Outbound::Event(e))=>tx.send(Message::Text(serde_json::to_string(&wire_event(state.daemon_id(),e.seq,&e.topic,e.payload))?.into())).await?,Ok(Outbound::Binary(v))=>tx.send(Message::Binary(v.into())).await?,Err(broadcast::error::RecvError::Lagged(_))=>{let seq=state.db.last_seq()?;tx.send(Message::Text(serde_json::to_string(&wire_event(state.daemon_id(),seq,"snapshot",state.db.snapshot()?))?.into())).await?},Err(_)=>break}
+            push=pushes.recv()=>match push{Ok(Outbound::Event(e))=>tx.send(Message::Text(serde_json::to_string(&wire_event(state.daemon_id(),e.seq,&e.topic,e.payload))?.into())).await?,Ok(Outbound::Binary(v))=>tx.send(Message::Binary(v.into())).await?,Err(broadcast::error::RecvError::Lagged(_))=>{let seq=state.db.last_seq()?;tx.send(Message::Text(serde_json::to_string(&wire_event(state.daemon_id(),seq,"snapshot",state.db.snapshot()?))?.into())).await?},Err(_)=>break},
+            _=heartbeat.tick()=>tx.send(Message::Ping(Vec::new().into())).await?,
         }
     }
+    tracing::info!(client_trace_id, "websocket client disconnected");
     Ok(())
 }
 
@@ -167,6 +172,7 @@ async fn dispatch(state: &AppState, request: &Envelope) -> Result<Value> {
             "version": updater::current_version(),
             "updateChannel": updater::configured_channel(),
         })),
+        "system.ping" => Ok(json!({"pong":true})),
         "daemon.update.status" => Ok(updater::status()),
         "daemon.update.check" => {
             let channel = UpdateChannel::parse(p["channel"].as_str().unwrap_or(

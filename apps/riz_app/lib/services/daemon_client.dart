@@ -52,6 +52,8 @@ class DaemonClient {
   final _downloads = <String, _DownloadTransfer>{};
   int _generation = 0;
   Timer? _authTimer;
+  Timer? _heartbeatTimer;
+  bool _heartbeatInFlight = false;
   int lastSeq = 0;
 
   Future<void> connect() async {
@@ -177,6 +179,7 @@ class DaemonClient {
           ].whereType<Object>().join(' '),
         );
         onStatus(true, null);
+        _startHeartbeat(_generation);
       }
       _pending.remove(envelope['requestId'])?.complete(payload);
     } else if (envelope['type'] == 'event') {
@@ -193,7 +196,13 @@ class DaemonClient {
   Future<Map<String, dynamic>> request(
     String method, [
     Map<String, dynamic> params = const {},
-  ]) {
+  ]) => _request(method, params);
+
+  Future<Map<String, dynamic>> _request(
+    String method,
+    Map<String, dynamic> params, {
+    Duration? timeout,
+  }) {
     final channel = _channel;
     if (channel == null) throw StateError('Not connected');
     final id = const Uuid().v4();
@@ -207,16 +216,45 @@ class DaemonClient {
         'payload': {'method': method, 'params': params},
       }),
     );
-    final timeout = method == 'daemon.update.install'
-        ? const Duration(minutes: 5)
-        : const Duration(seconds: 30);
+    final requestTimeout =
+        timeout ??
+        (method == 'daemon.update.install'
+            ? const Duration(minutes: 5)
+            : const Duration(seconds: 30));
     return completer.future.timeout(
-      timeout,
+      requestTimeout,
       onTimeout: () {
         _pending.remove(id);
         throw TimeoutException(method);
       },
     );
+  }
+
+  void _startHeartbeat(int generation) {
+    _heartbeatTimer?.cancel();
+    _debug('heartbeat.started', detail: 'interval=10s timeout=6s');
+    _heartbeatTimer = Timer.periodic(const Duration(seconds: 10), (_) {
+      if (generation != _generation || _heartbeatInFlight) return;
+      unawaited(_heartbeat(generation));
+    });
+  }
+
+  Future<void> _heartbeat(int generation) async {
+    _heartbeatInFlight = true;
+    try {
+      await _request(
+        'system.ping',
+        const {},
+        timeout: const Duration(seconds: 6),
+      );
+    } catch (error) {
+      if (generation != _generation) return;
+      _debug('heartbeat.failed', level: 'error', detail: error.toString());
+      unawaited(_channel?.sink.close());
+      _disconnected('Heartbeat failed: $error', generation);
+    } finally {
+      _heartbeatInFlight = false;
+    }
   }
 
   void sendTerminal(String id, List<int> data) {
@@ -273,6 +311,9 @@ class DaemonClient {
     if (generation != _generation) return;
     _authTimer?.cancel();
     _authTimer = null;
+    _heartbeatTimer?.cancel();
+    _heartbeatTimer = null;
+    _heartbeatInFlight = false;
     _generation++;
     final subscription = _subscription;
     _subscription = null;
@@ -299,6 +340,9 @@ class DaemonClient {
     _generation++;
     _authTimer?.cancel();
     _authTimer = null;
+    _heartbeatTimer?.cancel();
+    _heartbeatTimer = null;
+    _heartbeatInFlight = false;
     final subscription = _subscription;
     final channel = _channel;
     _subscription = null;
