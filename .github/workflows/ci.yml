@@ -62,7 +62,7 @@ jobs:
         run: |
           set -euo pipefail
           cargo_version=$(awk -F '"' '/^version = "/ { print $2; exit }' Cargo.toml)
-          latest_tag=$(gh api "repos/${GITHUB_REPOSITORY}/releases/latest" --jq .tag_name 2>/dev/null || true)
+          latest_tag=$(gh api "repos/${GITHUB_REPOSITORY}/releases/latest" --jq .tag_name 2>/dev/null) || latest_tag=
           latest_version=${latest_tag#v}
           latest_version=${latest_version:-0.0.0}
           sh scripts/release-plan.sh "$cargo_version" "$latest_version" "$GITHUB_SHA" | tee -a "$GITHUB_OUTPUT"
