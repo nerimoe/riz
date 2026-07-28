@@ -12,8 +12,11 @@ TMP_DIR="${TMPDIR:-/tmp}/riz-install-$$"
 NEW_BIN="$TMP_DIR/rizd"
 OLD_BIN="$TMP_DIR/rizd.previous"
 INIT_OUTPUT="$TMP_DIR/init-output"
+RELAY_OUTPUT="$TMP_DIR/relay-output"
+RELAY_URL="${RIZ_RELAY_URL-https://riz-relay.zzx2022766809.workers.dev}"
 SERVICE_FILE=
 HAD_SERVICE=0
+BUILD_FROM_SOURCE=0
 
 cleanup() {
   rm -rf "$TMP_DIR"
@@ -32,20 +35,12 @@ ARCH=$(uname -m)
 case "$OS:$ARCH" in
   Linux:x86_64|Linux:amd64) TARGET=x86_64-unknown-linux-gnu ;;
   Linux:aarch64|Linux:arm64) TARGET=aarch64-unknown-linux-gnu ;;
-  Darwin:x86_64|Darwin:amd64) TARGET=x86_64-apple-darwin ;;
-  Darwin:arm64|Darwin:aarch64) TARGET=aarch64-apple-darwin ;;
+  Darwin:x86_64|Darwin:amd64) TARGET=x86_64-apple-darwin; BUILD_FROM_SOURCE=1 ;;
+  Darwin:arm64|Darwin:aarch64) TARGET=aarch64-apple-darwin; BUILD_FROM_SOURCE=1 ;;
   *) fail "unsupported platform: $OS $ARCH" ;;
 esac
 
-if [ -n "${RIZ_DOWNLOAD_BASE:-}" ]; then
-  BASE=${RIZ_DOWNLOAD_BASE%/}
-elif [ "$VERSION" = latest ]; then
-  BASE="https://github.com/$REPO/releases/latest/download"
-else
-  BASE="https://github.com/$REPO/releases/download/$VERSION"
-fi
 ASSET="rizd-$TARGET"
-URL="$BASE/$ASSET"
 
 mkdir -p "$TMP_DIR" "$INSTALL_DIR" "$DATA_DIR"
 
@@ -74,21 +69,76 @@ download() {
   fi
 }
 
-echo "Downloading $ASSET from $REPO..."
-download "$URL" "$NEW_BIN" || fail "download failed: $URL"
-download "$URL.sha256" "$TMP_DIR/$ASSET.sha256" || \
-  fail "checksum download failed: $URL.sha256"
+build_macos() {
+  command -v cargo >/dev/null 2>&1 || \
+    fail "cargo is required to build rizd on macOS; install Rust from https://rustup.rs"
 
-EXPECTED=$(awk 'NR==1 {print $1}' "$TMP_DIR/$ASSET.sha256")
-[ -n "$EXPECTED" ] || fail "empty checksum"
-if command -v sha256sum >/dev/null 2>&1; then
-  ACTUAL=$(sha256sum "$NEW_BIN" | awk '{print $1}')
-elif command -v shasum >/dev/null 2>&1; then
-  ACTUAL=$(shasum -a 256 "$NEW_BIN" | awk '{print $1}')
+  if [ -n "${RIZ_SOURCE_DIR:-}" ]; then
+    SOURCE_DIR=$RIZ_SOURCE_DIR
+    [ -f "$SOURCE_DIR/Cargo.toml" ] || \
+      fail "RIZ_SOURCE_DIR does not contain Cargo.toml: $SOURCE_DIR"
+  else
+    command -v git >/dev/null 2>&1 || \
+      fail "git is required to fetch Riz source on macOS"
+    SOURCE_DIR="$TMP_DIR/source"
+    REPO_URL="https://github.com/$REPO.git"
+    if [ "$VERSION" = latest ]; then
+      echo "Fetching the latest Riz source from $REPO..."
+      if [ -n "$TOKEN" ]; then
+        git -c "http.extraHeader=Authorization: Bearer $TOKEN" clone \
+          --depth 1 "$REPO_URL" "$SOURCE_DIR"
+      else
+        git clone --depth 1 "$REPO_URL" "$SOURCE_DIR"
+      fi
+    else
+      echo "Fetching Riz source $VERSION from $REPO..."
+      if [ -n "$TOKEN" ]; then
+        git -c "http.extraHeader=Authorization: Bearer $TOKEN" clone \
+          --depth 1 --branch "$VERSION" "$REPO_URL" "$SOURCE_DIR"
+      else
+        git clone --depth 1 --branch "$VERSION" "$REPO_URL" "$SOURCE_DIR"
+      fi
+    fi
+  fi
+
+  echo "Building rizd for $TARGET on this Mac..."
+  CARGO_TARGET_DIR="$TMP_DIR/cargo-target" cargo build \
+    --manifest-path "$SOURCE_DIR/Cargo.toml" \
+    --release --locked -p rizd
+  cp "$TMP_DIR/cargo-target/release/rizd" "$NEW_BIN"
+}
+
+download_linux() {
+  if [ -n "${RIZ_DOWNLOAD_BASE:-}" ]; then
+    BASE=${RIZ_DOWNLOAD_BASE%/}
+  elif [ "$VERSION" = latest ]; then
+    BASE="https://github.com/$REPO/releases/latest/download"
+  else
+    BASE="https://github.com/$REPO/releases/download/$VERSION"
+  fi
+  URL="$BASE/$ASSET"
+  echo "Downloading $ASSET from $REPO..."
+  download "$URL" "$NEW_BIN" || fail "download failed: $URL"
+  download "$URL.sha256" "$TMP_DIR/$ASSET.sha256" || \
+    fail "checksum download failed: $URL.sha256"
+
+  EXPECTED=$(awk 'NR==1 {print $1}' "$TMP_DIR/$ASSET.sha256")
+  [ -n "$EXPECTED" ] || fail "empty checksum"
+  if command -v sha256sum >/dev/null 2>&1; then
+    ACTUAL=$(sha256sum "$NEW_BIN" | awk '{print $1}')
+  elif command -v shasum >/dev/null 2>&1; then
+    ACTUAL=$(shasum -a 256 "$NEW_BIN" | awk '{print $1}')
+  else
+    fail "sha256sum or shasum is required"
+  fi
+  [ "$ACTUAL" = "$EXPECTED" ] || fail "checksum mismatch for $ASSET"
+}
+
+if [ "$BUILD_FROM_SOURCE" -eq 1 ]; then
+  build_macos
 else
-  fail "sha256sum or shasum is required"
+  download_linux
 fi
-[ "$ACTUAL" = "$EXPECTED" ] || fail "checksum mismatch for $ASSET"
 
 chmod 755 "$NEW_BIN"
 "$NEW_BIN" --version >/dev/null || fail "downloaded binary cannot run"
@@ -108,6 +158,15 @@ if [ ! -f "$DATA_DIR/config.json" ]; then
     fail "rizd initialization failed"
   fi
   created_config=1
+fi
+
+if [ "$created_config" -eq 1 ] && [ -n "$RELAY_URL" ]; then
+  if ! RIZ_HOME="$DATA_DIR" "$BIN" relay configure --url "$RELAY_URL" >"$RELAY_OUTPUT"; then
+    [ "$had_binary" -eq 0 ] || mv "$OLD_BIN" "$BIN"
+    [ "$had_binary" -eq 1 ] || rm -f "$BIN"
+    rm -f "$DATA_DIR/config.json"
+    fail "rizd relay configuration failed"
+  fi
 fi
 
 install_linux_service() {
@@ -216,6 +275,10 @@ echo "Endpoint: ws://$LISTEN/ws"
 if [ "$created_config" -eq 1 ]; then
   echo
   cat "$INIT_OUTPUT"
+  if [ -s "$RELAY_OUTPUT" ]; then
+    echo
+    cat "$RELAY_OUTPUT"
+  fi
 else
   echo "Existing configuration kept at $DATA_DIR/config.json"
   echo "Use 'rizd token rotate' to generate a new token."

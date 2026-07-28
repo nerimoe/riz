@@ -15,6 +15,7 @@ import '../models.dart';
 import '../providers/app_controller.dart';
 import '../services/connection_url.dart';
 import '../services/file_transfer.dart';
+import '../services/pairing_code.dart';
 import 'adaptive_text_selection.dart';
 import 'ssh_install_dialog.dart';
 
@@ -300,6 +301,7 @@ class _ConnectionDialog extends ConsumerStatefulWidget {
 }
 
 class _ConnectionDialogState extends ConsumerState<_ConnectionDialog> {
+  final pairingCode = TextEditingController();
   final name = TextEditingController(text: 'My Mac');
   final url = TextEditingController(
     text: kIsWeb && Uri.base.scheme == 'https'
@@ -323,6 +325,7 @@ class _ConnectionDialogState extends ConsumerState<_ConnectionDialog> {
     name.dispose();
     url.dispose();
     token.dispose();
+    pairingCode.dispose();
     super.dispose();
   }
 
@@ -337,45 +340,82 @@ class _ConnectionDialogState extends ConsumerState<_ConnectionDialog> {
           TextField(
             selectionControls: rizTextSelectionControls,
             magnifierConfiguration: rizTextMagnifierConfiguration,
-            controller: name,
-            decoration: InputDecoration(labelText: tr(context, '名称', 'Name')),
+            controller: pairingCode,
+            autocorrect: false,
+            enableSuggestions: false,
+            decoration: InputDecoration(
+              labelText: tr(context, '配对码', 'Pairing code'),
+              hintText: 'riz1...',
+              prefixIcon: const Icon(Icons.key_rounded),
+            ),
           ),
-          const SizedBox(height: 12),
-          TextField(
-            selectionControls: rizTextSelectionControls,
-            magnifierConfiguration: rizTextMagnifierConfiguration,
-            controller: url,
-            keyboardType: TextInputType.url,
-            decoration: const InputDecoration(labelText: 'WebSocket URL'),
+          const SizedBox(height: 8),
+          Align(
+            alignment: AlignmentDirectional.centerStart,
+            child: Text(
+              tr(
+                context,
+                '粘贴电脑上 `rizd relay configure` 显示的配对码。',
+                'Paste the pairing code shown by `rizd relay configure`.',
+              ),
+              style: context.text.bodySmall,
+            ),
           ),
-          const SizedBox(height: 12),
-          TextField(
-            selectionControls: rizTextSelectionControls,
-            magnifierConfiguration: rizTextMagnifierConfiguration,
-            controller: token,
-            obscureText: true,
-            decoration: const InputDecoration(labelText: 'Token'),
-          ),
-          if (isInsecureRemoteDaemonUrl(url.text)) ...[
-            const SizedBox(height: 12),
-            Row(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Icon(Icons.warning_amber_rounded, color: context.colors.error),
-                const SizedBox(width: 12),
-                Expanded(
-                  child: Text(
-                    tr(
-                      context,
-                      '该地址会通过未加密的 WebSocket 发送 token 和电脑数据。远程连接请使用 WSS tunnel。',
-                      'This address sends the token and computer data over an unencrypted WebSocket. Use a WSS tunnel for remote connections.',
+          const SizedBox(height: 8),
+          ExpansionTile(
+            tilePadding: EdgeInsets.zero,
+            childrenPadding: EdgeInsets.zero,
+            title: Text(tr(context, '手动连接', 'Manual connection')),
+            children: [
+              TextField(
+                selectionControls: rizTextSelectionControls,
+                magnifierConfiguration: rizTextMagnifierConfiguration,
+                controller: name,
+                decoration: InputDecoration(
+                  labelText: tr(context, '名称', 'Name'),
+                ),
+              ),
+              const SizedBox(height: 12),
+              TextField(
+                selectionControls: rizTextSelectionControls,
+                magnifierConfiguration: rizTextMagnifierConfiguration,
+                controller: url,
+                keyboardType: TextInputType.url,
+                decoration: const InputDecoration(labelText: 'WebSocket URL'),
+              ),
+              const SizedBox(height: 12),
+              TextField(
+                selectionControls: rizTextSelectionControls,
+                magnifierConfiguration: rizTextMagnifierConfiguration,
+                controller: token,
+                obscureText: true,
+                decoration: const InputDecoration(labelText: 'Token'),
+              ),
+              if (isInsecureRemoteDaemonUrl(url.text)) ...[
+                const SizedBox(height: 12),
+                Row(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Icon(
+                      Icons.warning_amber_rounded,
+                      color: context.colors.error,
                     ),
-                    style: context.text.bodySmall,
-                  ),
+                    const SizedBox(width: 12),
+                    Expanded(
+                      child: Text(
+                        tr(
+                          context,
+                          '该地址会通过未加密的 WebSocket 发送 token 和电脑数据。远程连接请使用 WSS tunnel。',
+                          'This address sends the token and computer data over an unencrypted WebSocket. Use a WSS tunnel for remote connections.',
+                        ),
+                        style: context.text.bodySmall,
+                      ),
+                    ),
+                  ],
                 ),
               ],
-            ),
-          ],
+            ],
+          ),
         ],
       ),
     ),
@@ -390,12 +430,16 @@ class _ConnectionDialogState extends ConsumerState<_ConnectionDialog> {
             : () async {
                 setState(() => busy = true);
                 try {
+                  final paired = pairingCode.text.trim().isEmpty
+                      ? null
+                      : decodePairingCode(pairingCode.text);
                   await ref
                       .read(appControllerProvider.notifier)
                       .addConnection(
-                        name: name.text,
-                        url: url.text,
-                        token: token.text,
+                        name: paired?.name ?? name.text,
+                        url: paired?.url ?? url.text,
+                        token: paired?.token ?? token.text,
+                        relayToken: paired?.relayToken,
                       );
                   if (context.mounted) Navigator.pop(context);
                 } catch (e) {

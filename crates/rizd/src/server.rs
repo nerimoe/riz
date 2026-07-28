@@ -1260,6 +1260,7 @@ mod tests {
                 listen: "127.0.0.1:0".parse().unwrap(),
                 token_hash: hash_token("secret"),
                 issued_tokens: Vec::new(),
+                relay: None,
             },
             database,
         );

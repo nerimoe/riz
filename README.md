@@ -12,6 +12,7 @@ project or remain unbound as quick chats. See
 - `crates/rizd`: Tokio/Axum/SQLite daemon for Linux and macOS
 - `crates/riz_protocol`: versioned JSON and binary WebSocket protocol
 - `apps/riz_app`: Flutter Web/iOS/Android client
+- `relay`: Cloudflare Worker and Durable Object WebSocket relay
 - `install.sh` / `uninstall.sh`: user-level systemd and launchd installation
 - `scripts`: installer tests and compatibility helpers
 
@@ -35,21 +36,26 @@ To install the latest release daemon for the current architecture:
 ./install.sh
 ```
 
-The installer downloads and verifies `rizd`, installs it at
+On Linux, the installer downloads and verifies `rizd`. On macOS, it fetches the
+selected source revision and builds `rizd` locally with Cargo. It installs at
 `~/.local/bin/rizd`, initializes `~/.riz`, prints the bearer token once, and
-starts a user service with systemd on Linux or launchd on macOS. It supports:
+starts a user service with systemd on Linux or launchd on macOS. A new install
+also configures the Riz Worker relay and prints a single `riz1...` pairing code.
+It supports:
 
 - `RIZ_VERSION=vX.Y.Z` to install a specific release.
 - `RIZ_REPO=owner/repository` to use another GitHub repository.
 - `RIZ_GITHUB_TOKEN` for mirrors hosted in a private repository.
 - `RIZ_DOWNLOAD_BASE` for a release mirror or local test fixture.
+- `RIZ_SOURCE_DIR` to build an existing source checkout on macOS.
+- `RIZ_RELAY_URL` to select another relay origin; set it to an empty value to
+  leave relay configuration disabled.
 - `RIZ_LISTEN`, `RIZ_HOME`, and `RIZ_INSTALL_DIR` to override installation defaults.
 
-Add `ws://127.0.0.1:7497/ws` for local testing, or the WSS URL supplied by
-your tunnel. Automatic GitHub releases currently contain Linux x86_64 and
-ARM64 binaries only. The macOS installer path is supported, but a matching
-`rizd-aarch64-apple-darwin` or `rizd-x86_64-apple-darwin` asset must be added to
-the release separately.
+Paste the pairing code into the Flutter client for remote use, or add
+`ws://127.0.0.1:7497/ws` for local testing. Automatic GitHub releases contain
+Linux x86_64 and ARM64 binaries only. See [`docs/relay.md`](docs/relay.md) for
+the relay architecture, security boundary, and self-hosting instructions.
 
 The Settings view shows the running `rizd` version and can check either the
 stable or prerelease channel. An accepted update is downloaded from
@@ -95,7 +101,11 @@ Do not install the unrelated npm package named `agy`.
 
 ## Security
 
-The daemon has the same filesystem and command permissions as its macOS user. It listens on loopback by default and does not provide TLS, a relay, or an account system. Use a trusted TLS tunnel for remote access, keep the token out of URLs, and rotate it with `rizd token rotate` if exposed.
+The daemon has the same filesystem and command permissions as its OS user. It
+listens on loopback by default. The optional Worker relay provides WSS transport
+without exposing an inbound daemon port, but Cloudflare terminates transport
+TLS; it is not application-level end-to-end encryption. Keep pairing codes and
+tokens out of URLs, and rotate daemon tokens with `rizd token rotate` if exposed.
 
 The Web client must be served over HTTPS when used remotely so browser secure storage and WSS are available. Third-party control of Antigravity may violate Google terms; the UI displays this warning and the provider falls back to plain text when private formats are incompatible.
 
@@ -108,7 +118,8 @@ cd apps/riz_app
 dart run tool/daemon_smoke.dart ws://127.0.0.1:7497/ws TOKEN /tmp/riz-smoke.txt
 ```
 
-The daemon listens on `127.0.0.1:7497` by default. Put it behind a TLS-enabled tunnel before exposing it outside the machine.
+The daemon listens on `127.0.0.1:7497` by default. Use the outbound relay or a
+trusted TLS tunnel for remote access; do not expose this plaintext port directly.
 
 ## Status
 

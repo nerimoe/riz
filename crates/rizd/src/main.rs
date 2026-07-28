@@ -3,6 +3,7 @@ mod config;
 mod db;
 mod files;
 mod provider;
+mod relay;
 mod server;
 mod skills;
 mod state;
@@ -34,6 +35,10 @@ enum Commands {
         #[command(subcommand)]
         command: TokenCommand,
     },
+    Relay {
+        #[command(subcommand)]
+        command: RelayCommand,
+    },
     Doctor,
 }
 #[derive(Subcommand)]
@@ -47,6 +52,16 @@ enum TokenCommand {
     Revoke {
         id: uuid::Uuid,
     },
+}
+
+#[derive(Subcommand)]
+enum RelayCommand {
+    Configure {
+        #[arg(long)]
+        url: String,
+    },
+    Status,
+    Disable,
 }
 
 #[tokio::main]
@@ -76,7 +91,11 @@ async fn main() -> Result<()> {
                 )
             })?;
             let db = Database::open(&home.join("riz.db"))?;
-            server::serve(AppState::new(config, db)).await?;
+            let relay_config = config.clone();
+            let relay_task = tokio::spawn(relay::run(relay_config));
+            let result = server::serve(AppState::new(config, db)).await;
+            relay_task.abort();
+            result?;
         }
         Commands::Token {
             command: TokenCommand::Rotate,
@@ -117,6 +136,41 @@ async fn main() -> Result<()> {
                 anyhow::bail!("token not found: {id}");
             }
             println!("revoked {id}");
+        }
+        Commands::Relay {
+            command: RelayCommand::Configure { url },
+        } => {
+            let mut config = Config::load(&config_path)?;
+            let pairing_code = relay::configure(&mut config, &config_path, &url)?;
+            println!(
+                "Riz relay configured\nRelay: {}\n\nPairing code:\n{}\n\nThe pairing code contains credentials. Store it securely.",
+                config
+                    .relay
+                    .as_ref()
+                    .expect("configured relay")
+                    .client_url(),
+                pairing_code
+            );
+        }
+        Commands::Relay {
+            command: RelayCommand::Status,
+        } => {
+            let config = Config::load(&config_path)?;
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&serde_json::json!({
+                    "enabled": config.relay.is_some(),
+                    "clientUrl": config.relay.as_ref().map(config::RelayConfig::client_url),
+                }))?
+            );
+        }
+        Commands::Relay {
+            command: RelayCommand::Disable,
+        } => {
+            let mut config = Config::load(&config_path)?;
+            config.relay = None;
+            config.save(&config_path)?;
+            println!("Riz relay disabled. Restart rizd to apply the change.");
         }
         Commands::Doctor => {
             let config = Config::load(&config_path).ok();

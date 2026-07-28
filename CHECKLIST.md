@@ -1,5 +1,31 @@
 # Riz Completion Checklist
 
+## Worker Relay And Pairing (2026-07-29)
+
+- [x] Added and deployed a Cloudflare Worker plus SQLite Durable Object relay
+  at `riz-relay.zzx2022766809.workers.dev`; credentials stay out of URLs.
+- [x] Added four independent outbound relay channels per daemon so simultaneous
+  clients receive separate authenticated local WebSocket sessions.
+- [x] Added `rizd relay configure/status/disable`, versioned `riz1...` pairing
+  codes, Rustls WSS support, reconnect backoff, and `0600` config permissions.
+- [x] Added Flutter pairing-code-first connection UI. Daemon and relay tokens
+  are stored separately in secure storage; manual URL/token entry remains
+  available in a collapsed section.
+- [x] Changed macOS `install.sh` to compile from source locally. Fresh Linux and
+  macOS installs configure the relay and print a pairing code before starting
+  the user service; existing installations retain their relay credentials.
+- [x] Added Worker unit/integration tests and an Ubuntu CI job. The Worker DO
+  tests cover credential rejection, daemon availability, text/binary forwarding,
+  and simultaneous channel isolation.
+- [x] Installed the current release build on this Mac, restarted LaunchAgent,
+  and verified the real pairing code through the deployed Worker with native
+  WebSocket and Flutter Web clients.
+- [x] Deployed Flutter Web build `1.0.0+8` to `riz.neri.moe`; the real browser
+  shows the version, connected daemon, 32% quota, and restored quick-chat history.
+- [x] Final validation: 45 Rust tests, warning-free Clippy, 29 Flutter tests,
+  Flutter Wasm release build, 6 Worker tests, cross-platform installer tests,
+  and public Worker/Pages endpoint checks.
+
 ## Automated Releases And Updates
 
 - [x] Public GitHub repository with Ubuntu-only CI runners

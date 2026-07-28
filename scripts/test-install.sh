@@ -21,6 +21,10 @@ case "${1:-}" in
     echo 'Riz daemon initialized'
     echo 'Token: test-token'
     ;;
+  relay)
+    echo 'Pairing code:'
+    echo 'riz1.test-pairing-code'
+    ;;
   serve) exit 0 ;;
 esac
 EOF
@@ -47,6 +51,7 @@ test -x "$linux/home/.local/bin/rizd"
 test -f "$linux/home/.config/systemd/user/rizd.service"
 grep -q 'enable --now rizd.service' "$linux/home/systemctl.log"
 grep -q 'Token: test-token' "$linux/install.log"
+grep -q 'riz1.test-pairing-code' "$linux/install.log"
 HOME="$linux/home" XDG_CONFIG_HOME="$linux/home/.config" PATH="$linux/bin:$PATH" \
   "$ROOT/uninstall.sh"
 test ! -e "$linux/home/.local/bin/rizd"
@@ -76,13 +81,21 @@ cat >"$mac/bin/launchctl" <<'EOF'
 echo "$*" >> "$HOME/launchctl.log"
 EOF
 chmod +x "$mac/bin/launchctl"
+cat >"$mac/bin/cargo" <<'EOF'
+#!/bin/sh
+mkdir -p "$CARGO_TARGET_DIR/release"
+cp "$RIZ_TEST_BINARY" "$CARGO_TARGET_DIR/release/rizd"
+EOF
+chmod +x "$mac/bin/cargo"
 HOME="$mac/home" PATH="$mac/bin:$PATH" \
-  RIZ_DOWNLOAD_BASE="file://$mac/releases" \
+  RIZ_SOURCE_DIR="$ROOT" \
+  RIZ_TEST_BINARY="$mac/releases/rizd-aarch64-apple-darwin" \
   "$ROOT/install.sh" >"$mac/install.log"
 test -x "$mac/home/.local/bin/rizd"
 test -f "$mac/home/Library/LaunchAgents/dev.riz.rizd.plist"
 grep -q 'bootstrap gui/' "$mac/home/launchctl.log"
 grep -q 'Token: test-token' "$mac/install.log"
+grep -q 'riz1.test-pairing-code' "$mac/install.log"
 HOME="$mac/home" PATH="$mac/bin:$PATH" "$ROOT/uninstall.sh"
 test ! -e "$mac/home/.local/bin/rizd"
 test -f "$mac/home/.riz/config.json"

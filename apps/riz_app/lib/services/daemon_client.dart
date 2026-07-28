@@ -38,6 +38,7 @@ class DaemonClient {
     required this.onEvent,
     required this.onBinary,
     required this.onStatus,
+    this.protocols,
     this.onDebug,
   });
   final String url;
@@ -45,6 +46,7 @@ class DaemonClient {
   final EventHandler onEvent;
   final BinaryHandler onBinary;
   final void Function(bool connected, String? error) onStatus;
+  final Iterable<String>? protocols;
   final DebugHandler? onDebug;
   WebSocketChannel? _channel;
   StreamSubscription? _subscription;
@@ -61,7 +63,10 @@ class DaemonClient {
     await close();
     final generation = ++_generation;
     try {
-      final channel = WebSocketChannel.connect(Uri.parse(url));
+      final channel = WebSocketChannel.connect(
+        Uri.parse(url),
+        protocols: protocols,
+      );
       await channel.ready;
       _debug('socket.ready');
       if (generation != _generation) {

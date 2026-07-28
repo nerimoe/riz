@@ -11,3 +11,8 @@ apps/riz_app/.flutter-plugins*
 apps/riz_app/android/build/
 apps/riz_app/ios/Pods/
 apps/riz_app/ios/.symlinks/
+# Cloudflare Worker local state and dependencies
+.wrangler/
+relay/node_modules/
+relay/coverage/
+relay/worker-configuration.d.ts

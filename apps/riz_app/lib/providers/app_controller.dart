@@ -79,6 +79,9 @@ class AppController extends Notifier<RizState> {
 
   Future<void> _connectOne(DaemonConnection connection) async {
     final token = await _secure.read(key: 'riz.token.${connection.id}');
+    final relayToken = await _secure.read(
+      key: 'riz.relayToken.${connection.id}',
+    );
     if (token == null) {
       _connectionLog(
         connection.id,
@@ -93,6 +96,7 @@ class AppController extends Notifier<RizState> {
     daemon = DaemonClient(
       url: connection.url,
       token: token,
+      protocols: relayToken == null ? null : ['riz-relay-v1.$relayToken'],
       onEvent: (topic, data, seq) => _event(connection.id, topic, data),
       onBinary: (channel, id, data) {
         if (channel == 3) _terminalListeners[id]?.call(data);
@@ -242,9 +246,15 @@ class AppController extends Notifier<RizState> {
     required String name,
     required String url,
     required String token,
+    String? relayToken,
   }) async {
     final normalizedToken = token.trim();
     if (normalizedToken.isEmpty) throw ArgumentError('Token cannot be empty');
+    final normalizedRelayToken = relayToken?.trim();
+    if (normalizedRelayToken != null &&
+        !RegExp(r'^[A-Za-z0-9_-]{32,256}$').hasMatch(normalizedRelayToken)) {
+      throw ArgumentError('Invalid relay token');
+    }
     final normalized = normalizeDaemonUrl(
       url,
       requireSecureWebSocket: kIsWeb && Uri.base.scheme == 'https',
@@ -259,6 +269,12 @@ class AppController extends Notifier<RizState> {
       key: 'riz.token.${connection.id}',
       value: normalizedToken,
     );
+    if (normalizedRelayToken != null) {
+      await _secure.write(
+        key: 'riz.relayToken.${connection.id}',
+        value: normalizedRelayToken,
+      );
+    }
     await _saveConnections(connections, connection.id);
     state = state.copyWith(
       connections: connections,
@@ -292,6 +308,7 @@ class AppController extends Notifier<RizState> {
     _reconnectTimers.remove(id)?.cancel();
     await _clients.remove(id)?.close();
     await _secure.delete(key: 'riz.token.$id');
+    await _secure.delete(key: 'riz.relayToken.$id');
     final connections = state.connections.where((c) => c.id != id).toList();
     final active = connections.firstOrNull?.id;
     await _saveConnections(connections, active);

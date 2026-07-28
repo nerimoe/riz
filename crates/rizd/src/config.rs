@@ -5,6 +5,8 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::{
     fs,
+    fs::OpenOptions,
+    io::Write,
     net::SocketAddr,
     path::{Path, PathBuf},
 };
@@ -21,6 +23,24 @@ pub struct IssuedToken {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct RelayConfig {
+    pub base_url: String,
+    pub device_id: String,
+    pub token: String,
+}
+
+impl RelayConfig {
+    pub fn daemon_url(&self) -> String {
+        format!("{}/v1/relay/{}/daemon", self.base_url, self.device_id)
+    }
+
+    pub fn client_url(&self) -> String {
+        format!("{}/v1/relay/{}/client", self.base_url, self.device_id)
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct Config {
     pub daemon_id: Uuid,
     pub name: String,
@@ -28,6 +48,8 @@ pub struct Config {
     pub token_hash: String,
     #[serde(default)]
     pub issued_tokens: Vec<IssuedToken>,
+    #[serde(default)]
+    pub relay: Option<RelayConfig>,
 }
 
 impl Config {
@@ -52,6 +74,7 @@ impl Config {
             listen,
             token_hash: hash_token(&token),
             issued_tokens: Vec::new(),
+            relay: None,
         };
         config.save(path)?;
         Ok((config, token))
@@ -67,7 +90,16 @@ impl Config {
             fs::create_dir_all(parent)?;
         }
         let temp = path.with_extension("tmp");
-        fs::write(&temp, serde_json::to_vec_pretty(self)?)?;
+        let mut options = OpenOptions::new();
+        options.write(true).create(true).truncate(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600);
+        }
+        let mut file = options.open(&temp)?;
+        file.write_all(&serde_json::to_vec_pretty(self)?)?;
+        file.sync_all()?;
         fs::rename(temp, path)?;
         Ok(())
     }
@@ -145,6 +177,7 @@ mod tests {
             listen: "127.0.0.1:7497".parse().unwrap(),
             token_hash: hash_token("secret"),
             issued_tokens: Vec::new(),
+            relay: None,
         };
         assert!(c.verify_token("secret"));
         assert!(!c.verify_token("other"));
