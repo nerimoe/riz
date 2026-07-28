@@ -483,6 +483,7 @@ void main() {
     );
     await tester.pump();
 
+    expect(find.text('Version 1.0.0+2'), findsOneWidget);
     expect(find.text('Current version: 0.1.0'), findsOneWidget);
     await tester.tap(find.widgetWithText(OutlinedButton, 'Check for updates'));
     await tester.pump();
@@ -521,6 +522,8 @@ void main() {
       240,
       scrollable: find.byType(Scrollable).last,
     );
+    await tester.drag(find.byType(Scrollable).last, const Offset(0, -80));
+    await tester.pump();
     await tester.tap(diagnostics);
     await tester.pumpAndSettle();
 

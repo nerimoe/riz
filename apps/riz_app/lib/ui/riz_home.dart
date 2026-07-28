@@ -9,6 +9,7 @@ import 'package:image_picker/image_picker.dart';
 import 'package:code_text_field/code_text_field.dart';
 import 'package:xterm/xterm.dart';
 
+import '../app_build.dart';
 import '../main.dart';
 import '../models.dart';
 import '../providers/app_controller.dart';
@@ -4605,6 +4606,11 @@ class _SettingsViewState extends ConsumerState<_SettingsView> {
       title: tr(context, '设置', 'Settings'),
       child: ListView(
         children: [
+          ListTile(
+            leading: const Icon(Icons.info_outline),
+            title: Text(kIsWeb ? 'Riz Web' : 'Riz'),
+            subtitle: const Text('Version $rizAppVersion'),
+          ),
           ListTile(
             leading: const Icon(Icons.palette_outlined),
             title: Text(tr(context, '主题', 'Theme')),
