@@ -84,10 +84,6 @@ async fn client_inner(mut socket: WebSocket, state: AppState) -> Result<()> {
         .as_str()
         .unwrap_or("unavailable");
     tracing::info!(client_trace_id, "websocket authentication received");
-    let authentication_delay = state.auth_limiter.delay();
-    if !authentication_delay.is_zero() {
-        tokio::time::sleep(authentication_delay).await;
-    }
     let token = envelope.payload["token"].as_str().unwrap_or_default();
     if !state.config.verify_token(token) {
         tracing::warn!(client_trace_id, "websocket authentication rejected");
