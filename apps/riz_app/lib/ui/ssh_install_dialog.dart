@@ -3,6 +3,7 @@ import 'package:hooks_riverpod/hooks_riverpod.dart';
 
 import '../providers/app_controller.dart';
 import '../services/ssh_installer.dart';
+import 'adaptive_text_selection.dart';
 
 class SshInstallDialog extends ConsumerStatefulWidget {
   const SshInstallDialog({super.key});
@@ -58,7 +59,11 @@ class _SshInstallDialogState extends ConsumerState<SshInstallDialog> {
         barrierDismissible: false,
         builder: (context) => AlertDialog(
           title: Text(t('验证 SSH 主机密钥', 'Verify SSH host key')),
-          content: SelectableText('$type\n$fingerprint'),
+          content: SelectableText(
+            '$type\n$fingerprint',
+            selectionControls: rizTextSelectionControls,
+            magnifierConfiguration: rizTextMagnifierConfiguration,
+          ),
           actions: [
             TextButton(
               onPressed: () => Navigator.pop(context, false),
@@ -126,6 +131,8 @@ class _SshInstallDialogState extends ConsumerState<SshInstallDialog> {
                 children: [
                   Expanded(
                     child: TextField(
+                      selectionControls: rizTextSelectionControls,
+                      magnifierConfiguration: rizTextMagnifierConfiguration,
                       controller: host,
                       decoration: InputDecoration(labelText: t('主机', 'Host')),
                     ),
@@ -134,6 +141,8 @@ class _SshInstallDialogState extends ConsumerState<SshInstallDialog> {
                   SizedBox(
                     width: 100,
                     child: TextField(
+                      selectionControls: rizTextSelectionControls,
+                      magnifierConfiguration: rizTextMagnifierConfiguration,
                       controller: port,
                       keyboardType: TextInputType.number,
                       decoration: InputDecoration(labelText: t('端口', 'Port')),
@@ -143,11 +152,15 @@ class _SshInstallDialogState extends ConsumerState<SshInstallDialog> {
               ),
               const SizedBox(height: 10),
               TextField(
+                selectionControls: rizTextSelectionControls,
+                magnifierConfiguration: rizTextMagnifierConfiguration,
                 controller: username,
                 decoration: InputDecoration(labelText: t('用户名', 'Username')),
               ),
               const SizedBox(height: 10),
               TextField(
+                selectionControls: rizTextSelectionControls,
+                magnifierConfiguration: rizTextMagnifierConfiguration,
                 controller: password,
                 obscureText: true,
                 decoration: InputDecoration(
@@ -156,6 +169,8 @@ class _SshInstallDialogState extends ConsumerState<SshInstallDialog> {
               ),
               const SizedBox(height: 10),
               TextField(
+                selectionControls: rizTextSelectionControls,
+                magnifierConfiguration: rizTextMagnifierConfiguration,
                 controller: privateKey,
                 minLines: 2,
                 maxLines: 5,
@@ -169,6 +184,8 @@ class _SshInstallDialogState extends ConsumerState<SshInstallDialog> {
               ),
               const SizedBox(height: 10),
               TextField(
+                selectionControls: rizTextSelectionControls,
+                magnifierConfiguration: rizTextMagnifierConfiguration,
                 controller: releaseUrl,
                 keyboardType: TextInputType.url,
                 decoration: InputDecoration(
@@ -181,6 +198,8 @@ class _SshInstallDialogState extends ConsumerState<SshInstallDialog> {
               ),
               const SizedBox(height: 10),
               TextField(
+                selectionControls: rizTextSelectionControls,
+                magnifierConfiguration: rizTextMagnifierConfiguration,
                 controller: sha256,
                 decoration: InputDecoration(
                   labelText: t(
@@ -191,6 +210,8 @@ class _SshInstallDialogState extends ConsumerState<SshInstallDialog> {
               ),
               const SizedBox(height: 10),
               TextField(
+                selectionControls: rizTextSelectionControls,
+                magnifierConfiguration: rizTextMagnifierConfiguration,
                 controller: endpoint,
                 keyboardType: TextInputType.url,
                 decoration: InputDecoration(
@@ -203,7 +224,11 @@ class _SshInstallDialogState extends ConsumerState<SshInstallDialog> {
               if (progress != null)
                 Padding(
                   padding: const EdgeInsets.only(top: 12),
-                  child: SelectableText(progress!),
+                  child: SelectableText(
+                    progress!,
+                    selectionControls: rizTextSelectionControls,
+                    magnifierConfiguration: rizTextMagnifierConfiguration,
+                  ),
                 ),
             ],
           ),

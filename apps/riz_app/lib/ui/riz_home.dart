@@ -15,6 +15,7 @@ import '../models.dart';
 import '../providers/app_controller.dart';
 import '../services/connection_url.dart';
 import '../services/file_transfer.dart';
+import 'adaptive_text_selection.dart';
 import 'ssh_install_dialog.dart';
 
 String tr(BuildContext context, String zh, String en) =>
@@ -334,17 +335,23 @@ class _ConnectionDialogState extends ConsumerState<_ConnectionDialog> {
         mainAxisSize: MainAxisSize.min,
         children: [
           TextField(
+            selectionControls: rizTextSelectionControls,
+            magnifierConfiguration: rizTextMagnifierConfiguration,
             controller: name,
             decoration: InputDecoration(labelText: tr(context, '名称', 'Name')),
           ),
           const SizedBox(height: 12),
           TextField(
+            selectionControls: rizTextSelectionControls,
+            magnifierConfiguration: rizTextMagnifierConfiguration,
             controller: url,
             keyboardType: TextInputType.url,
             decoration: const InputDecoration(labelText: 'WebSocket URL'),
           ),
           const SizedBox(height: 12),
           TextField(
+            selectionControls: rizTextSelectionControls,
+            magnifierConfiguration: rizTextMagnifierConfiguration,
             controller: token,
             obscureText: true,
             decoration: const InputDecoration(labelText: 'Token'),
@@ -437,6 +444,8 @@ class _TokenDialogState extends ConsumerState<_TokenDialog> {
     content: SizedBox(
       width: 420,
       child: TextField(
+        selectionControls: rizTextSelectionControls,
+        magnifierConfiguration: rizTextMagnifierConfiguration,
         controller: token,
         autofocus: true,
         obscureText: true,
@@ -1931,6 +1940,8 @@ class _ChatViewState extends ConsumerState<_ChatView> {
                   child: SingleChildScrollView(
                     padding: const EdgeInsets.fromLTRB(16, 0, 16, 12),
                     child: SelectableText(
+                      selectionControls: rizTextSelectionControls,
+                      magnifierConfiguration: rizTextMagnifierConfiguration,
                       permission['detail']?.toString() ?? '',
                       style: context.text.bodySmall?.copyWith(
                         fontFamily: 'monospace',
@@ -2034,6 +2045,8 @@ class _ChatViewState extends ConsumerState<_ChatView> {
                           ),
                         ),
                       TextField(
+                        selectionControls: rizTextSelectionControls,
+                        magnifierConfiguration: rizTextMagnifierConfiguration,
                         controller: composer,
                         minLines: 1,
                         maxLines: 7,
@@ -2518,7 +2531,13 @@ class _MessageView extends ConsumerWidget {
               ExpansionTile(
                 tilePadding: EdgeInsets.zero,
                 title: Text(tr(context, '诊断', 'Diagnostics')),
-                children: [SelectableText(content['diagnostic'].toString())],
+                children: [
+                  SelectableText(
+                    content['diagnostic'].toString(),
+                    selectionControls: rizTextSelectionControls,
+                    magnifierConfiguration: rizTextMagnifierConfiguration,
+                  ),
+                ],
               ),
             if (message['status'] == 'queued')
               Padding(
@@ -2760,7 +2779,11 @@ class _StructuredEventView extends StatelessWidget {
       children: [
         Align(
           alignment: Alignment.centerLeft,
-          child: SelectableText(event['text']?.toString() ?? jsonEncode(event)),
+          child: SelectableText(
+            event['text']?.toString() ?? jsonEncode(event),
+            selectionControls: rizTextSelectionControls,
+            magnifierConfiguration: rizTextMagnifierConfiguration,
+          ),
         ),
       ],
     );
@@ -2780,6 +2803,8 @@ Future<void> _showRenameProjectDialog(
     builder: (dialogContext) => AlertDialog(
       title: Text(tr(context, '重命名项目', 'Rename project')),
       content: TextField(
+        selectionControls: rizTextSelectionControls,
+        magnifierConfiguration: rizTextMagnifierConfiguration,
         controller: controller,
         autofocus: true,
         decoration: InputDecoration(
@@ -3257,7 +3282,14 @@ class _RemoteFolderDialogState extends ConsumerState<_RemoteFolderDialog> {
                         },
                   icon: const Icon(Icons.arrow_upward),
                 ),
-                Expanded(child: SelectableText(path, maxLines: 1)),
+                Expanded(
+                  child: SelectableText(
+                    path,
+                    maxLines: 1,
+                    selectionControls: rizTextSelectionControls,
+                    magnifierConfiguration: rizTextMagnifierConfiguration,
+                  ),
+                ),
                 IconButton(
                   tooltip: showHidden
                       ? tr(context, '隐藏点文件', 'Hide hidden folders')
@@ -3293,6 +3325,8 @@ class _RemoteFolderDialogState extends ConsumerState<_RemoteFolderDialog> {
             ),
             if (widget.projectId == null)
               TextField(
+                selectionControls: rizTextSelectionControls,
+                magnifierConfiguration: rizTextMagnifierConfiguration,
                 controller: name,
                 decoration: InputDecoration(
                   labelText: tr(context, '项目名称（可选）', 'Project name (optional)'),
@@ -3668,6 +3702,8 @@ class _FilesPaneState extends ConsumerState<_FilesPane> {
                 ? Text(tr(context, '没有未提交的差异', 'No uncommitted changes'))
                 : SingleChildScrollView(
                     child: SelectableText(
+                      selectionControls: rizTextSelectionControls,
+                      magnifierConfiguration: rizTextMagnifierConfiguration,
                       diff,
                       style: context.text.bodySmall?.copyWith(
                         fontFamily: 'monospace',
@@ -3718,6 +3754,8 @@ class _FilesPaneState extends ConsumerState<_FilesPane> {
               ),
               Expanded(
                 child: TextField(
+                  selectionControls: rizTextSelectionControls,
+                  magnifierConfiguration: rizTextMagnifierConfiguration,
                   controller: search,
                   onSubmitted: (_) => searchFiles(),
                   decoration: InputDecoration(
@@ -3941,6 +3979,7 @@ class _FileEditor extends StatelessWidget {
                   behavior: HitTestBehavior.opaque,
                   onPointerDown: (_) => focusNode.requestFocus(),
                   child: CodeField(
+                    selectionControls: rizTextSelectionControls,
                     controller: editor!,
                     focusNode: focusNode,
                     padding: const EdgeInsets.all(12),
@@ -4348,6 +4387,8 @@ class _SkillEditorDialogState extends ConsumerState<_SkillEditorDialog> {
       width: 680,
       height: 520,
       child: TextField(
+        selectionControls: rizTextSelectionControls,
+        magnifierConfiguration: rizTextMagnifierConfiguration,
         controller: content,
         expands: true,
         maxLines: null,
@@ -4472,6 +4513,8 @@ class _QuotaViewState extends ConsumerState<_QuotaView> {
                   Padding(
                     padding: const EdgeInsets.all(16),
                     child: SelectableText(
+                      selectionControls: rizTextSelectionControls,
+                      magnifierConfiguration: rizTextMagnifierConfiguration,
                       error!,
                       style: context.text.bodySmall?.copyWith(
                         color: context.colors.error,
@@ -4509,6 +4552,8 @@ class _QuotaViewState extends ConsumerState<_QuotaView> {
                 const SizedBox(height: 20),
                 if (percentages.isEmpty)
                   SelectableText(
+                    selectionControls: rizTextSelectionControls,
+                    magnifierConfiguration: rizTextMagnifierConfiguration,
                     snapshot?['raw']?.toString() ?? jsonEncode(snapshot),
                   )
                 else
@@ -5028,6 +5073,8 @@ class _ConnectionDiagnosticsDialog extends ConsumerWidget {
                       label: tr(context, '还没有连接日志', 'No connection logs yet'),
                     )
                   : SelectionArea(
+                      selectionControls: rizTextSelectionControls,
+                      magnifierConfiguration: rizTextMagnifierConfiguration,
                       child: ListView.separated(
                         padding: const EdgeInsets.symmetric(vertical: 8),
                         itemCount: logs.length,
@@ -5210,6 +5257,8 @@ Future<String?> _textPrompt(
     builder: (context) => AlertDialog(
       title: Text(title),
       content: TextField(
+        selectionControls: rizTextSelectionControls,
+        magnifierConfiguration: rizTextMagnifierConfiguration,
         controller: ctl,
         autofocus: true,
         decoration: InputDecoration(labelText: label),
