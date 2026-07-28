@@ -1,0 +1,13 @@
+/target/
+/work/
+/outputs/
+/.dart_tool/
+/build/
+/.idea/
+/.vscode/
+*.log
+.DS_Store
+apps/riz_app/.flutter-plugins*
+apps/riz_app/android/build/
+apps/riz_app/ios/Pods/
+apps/riz_app/ios/.symlinks/

@@ -1,0 +1,36 @@
+[workspace]
+members = ["crates/riz_protocol", "crates/rizd"]
+resolver = "2"
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "Apache-2.0"
+repository = "https://github.com/riz-remote/riz"
+
+[workspace.dependencies]
+anyhow = "1.0"
+async-trait = "0.1"
+axum = { version = "0.8", features = ["ws"] }
+base64 = "0.22"
+chrono = { version = "0.4", features = ["serde"] }
+clap = { version = "4.5", features = ["derive"] }
+dirs = "6.0"
+futures-util = "0.3"
+mime_guess = "2.0"
+portable-pty = "0.9"
+rand = "0.9"
+regex = "1.12"
+rusqlite = { version = "0.38", features = ["bundled", "chrono"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+sha2 = "0.10"
+tempfile = "3.24"
+tokio = { version = "1.49", features = ["full"] }
+tokio-tungstenite = "0.29"
+tower-http = { version = "0.6", features = ["cors", "trace"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+uuid = { version = "1.19", features = ["v4", "serde"] }
+url = "2.5"
+walkdir = "2.5"
