@@ -267,6 +267,22 @@ class AppController extends Notifier<RizState> {
     await _connectOne(connection);
   }
 
+  Future<void> updateConnectionToken(String id, String token) async {
+    final value = token.trim();
+    if (value.isEmpty) throw ArgumentError('Token cannot be empty');
+    final connection = state.connections.where((item) => item.id == id).first;
+    _reconnectTimers.remove(id)?.cancel();
+    await _clients.remove(id)?.close();
+    await _secure.write(key: 'riz.token.$id', value: value);
+    _connectionLog(id, 'token.updated', 'info', null);
+    state = state.copyWith(
+      daemonStatuses: {...state.daemonStatuses, id: false},
+      connected: id == state.activeConnectionId ? false : state.connected,
+      clearError: id == state.activeConnectionId,
+    );
+    await _connectOne(connection);
+  }
+
   Future<void> removeConnection(String id) async {
     _reconnectTimers.remove(id)?.cancel();
     await _clients.remove(id)?.close();

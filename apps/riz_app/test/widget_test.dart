@@ -483,7 +483,7 @@ void main() {
     );
     await tester.pump();
 
-    expect(find.text('Version 1.0.0+2'), findsOneWidget);
+    expect(find.text('Version 1.0.0+3'), findsOneWidget);
     expect(find.text('Current version: 0.1.0'), findsOneWidget);
     await tester.tap(find.widgetWithText(OutlinedButton, 'Check for updates'));
     await tester.pump();

@@ -80,12 +80,17 @@ async fn client_inner(mut socket: WebSocket, state: AppState) -> Result<()> {
     if envelope.kind != "auth" {
         bail!("first frame must be auth")
     }
+    let client_trace_id = envelope.payload["clientTraceId"]
+        .as_str()
+        .unwrap_or("unavailable");
+    tracing::info!(client_trace_id, "websocket authentication received");
     let authentication_delay = state.auth_limiter.delay();
     if !authentication_delay.is_zero() {
         tokio::time::sleep(authentication_delay).await;
     }
     let token = envelope.payload["token"].as_str().unwrap_or_default();
     if !state.config.verify_token(token) {
+        tracing::warn!(client_trace_id, "websocket authentication rejected");
         state.auth_limiter.record_failure();
         tokio::time::sleep(state.auth_limiter.delay()).await;
         let failure = Envelope::failure(
@@ -104,11 +109,13 @@ async fn client_inner(mut socket: WebSocket, state: AppState) -> Result<()> {
     let hello = Envelope::response(
         &envelope,
         state.daemon_id(),
-        json!({"kind":"hello","daemon":{"id":state.daemon_id(),"name":state.config.name,"version":updater::current_version()},"protocolVersion":PROTOCOL_VERSION,"providers":[detected]}),
+        json!({"kind":"hello","clientTraceId":client_trace_id,"daemon":{"id":state.daemon_id(),"name":state.config.name,"version":updater::current_version()},"protocolVersion":PROTOCOL_VERSION,"providers":[detected]}),
     );
+    tracing::info!(client_trace_id, "websocket authentication accepted");
     socket
         .send(Message::Text(serde_json::to_string(&hello)?.into()))
         .await?;
+    tracing::info!(client_trace_id, "websocket hello sent");
     let events = state.db.events_after(last_seq, 1001)?;
     if events.len() > 1000 {
         let snapshot = wire_event(

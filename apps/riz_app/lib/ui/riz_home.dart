@@ -412,6 +412,76 @@ class _ConnectionDialogState extends ConsumerState<_ConnectionDialog> {
   );
 }
 
+class _TokenDialog extends ConsumerStatefulWidget {
+  const _TokenDialog({required this.connection});
+
+  final DaemonConnection connection;
+
+  @override
+  ConsumerState<_TokenDialog> createState() => _TokenDialogState();
+}
+
+class _TokenDialogState extends ConsumerState<_TokenDialog> {
+  final token = TextEditingController();
+  bool busy = false;
+
+  @override
+  void dispose() {
+    token.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) => AlertDialog(
+    title: Text(tr(context, '更新 token', 'Update token')),
+    content: SizedBox(
+      width: 420,
+      child: TextField(
+        controller: token,
+        autofocus: true,
+        obscureText: true,
+        decoration: InputDecoration(
+          labelText: 'Token',
+          helperText: widget.connection.name,
+        ),
+        onSubmitted: busy ? null : (_) => _save(),
+      ),
+    ),
+    actions: [
+      TextButton(
+        onPressed: busy ? null : () => Navigator.pop(context),
+        child: Text(tr(context, '取消', 'Cancel')),
+      ),
+      FilledButton(
+        onPressed: busy ? null : _save,
+        child: busy
+            ? const SizedBox.square(
+                dimension: 20,
+                child: CircularProgressIndicator(strokeWidth: 2),
+              )
+            : Text(tr(context, '保存并重连', 'Save and reconnect')),
+      ),
+    ],
+  );
+
+  Future<void> _save() async {
+    if (token.text.trim().isEmpty) return;
+    setState(() => busy = true);
+    try {
+      await ref
+          .read(appControllerProvider.notifier)
+          .updateConnectionToken(widget.connection.id, token.text);
+      if (mounted) Navigator.pop(context);
+    } catch (error) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(SnackBar(content: Text(error.toString())));
+      setState(() => busy = false);
+    }
+  }
+}
+
 class _ProjectsView extends ConsumerStatefulWidget {
   const _ProjectsView();
 
@@ -4745,21 +4815,34 @@ class _SettingsViewState extends ConsumerState<_SettingsView> {
               leading: const Icon(Icons.dns_outlined),
               title: Text(active.name),
               subtitle: Text(active.url),
-              trailing: IconButton(
-                tooltip: tr(context, '移除连接', 'Remove connection'),
-                onPressed: () async {
-                  if (await _confirm(
-                    context,
-                    tr(
-                      context,
-                      '移除此 daemon 连接？',
-                      'Remove this daemon connection?',
+              trailing: Row(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  IconButton(
+                    tooltip: tr(context, '更新 token', 'Update token'),
+                    onPressed: () => showDialog<void>(
+                      context: context,
+                      builder: (_) => _TokenDialog(connection: active),
                     ),
-                  )) {
-                    ctl.removeConnection(active.id);
-                  }
-                },
-                icon: const Icon(Icons.delete_outline),
+                    icon: const Icon(Icons.key_outlined),
+                  ),
+                  IconButton(
+                    tooltip: tr(context, '移除连接', 'Remove connection'),
+                    onPressed: () async {
+                      if (await _confirm(
+                        context,
+                        tr(
+                          context,
+                          '移除此 daemon 连接？',
+                          'Remove this daemon connection?',
+                        ),
+                      )) {
+                        ctl.removeConnection(active.id);
+                      }
+                    },
+                    icon: const Icon(Icons.delete_outline),
+                  ),
+                ],
               ),
             ),
           if (active != null && isInsecureRemoteDaemonUrl(active.url))

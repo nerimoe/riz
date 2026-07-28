@@ -51,6 +51,7 @@ class DaemonClient {
   final _pending = <String, Completer<Map<String, dynamic>>>{};
   final _downloads = <String, _DownloadTransfer>{};
   int _generation = 0;
+  Timer? _authTimer;
   int lastSeq = 0;
 
   Future<void> connect() async {
@@ -67,7 +68,19 @@ class DaemonClient {
       }
       _channel = channel;
       _subscription = channel.stream.listen(
-        _onData,
+        (raw) {
+          try {
+            _onData(raw);
+          } catch (error) {
+            _debug(
+              'frame.parse_failed',
+              level: 'error',
+              detail: error.toString(),
+            );
+            unawaited(channel.sink.close());
+            _disconnected('Invalid daemon frame: $error', generation);
+          }
+        },
         onError: (Object e) {
           _debug('socket.error', level: 'error', detail: e.toString());
           _disconnected(e.toString(), generation);
@@ -77,15 +90,31 @@ class DaemonClient {
           _disconnected('Connection closed', generation);
         },
       );
+      final traceId = const Uuid().v4();
       channel.sink.add(
         jsonEncode({
           'v': 1,
           'type': 'auth',
           'requestId': 'auth',
-          'payload': {'token': token, 'lastSeq': lastSeq},
+          'payload': {
+            'token': token,
+            'lastSeq': lastSeq,
+            'clientTraceId': traceId,
+          },
         }),
       );
-      _debug('auth.sent', detail: 'lastSeq=$lastSeq');
+      _debug('auth.sent', detail: 'trace=$traceId lastSeq=$lastSeq');
+      _authTimer?.cancel();
+      _authTimer = Timer(const Duration(seconds: 10), () {
+        if (generation != _generation) return;
+        _debug(
+          'auth.timeout',
+          level: 'error',
+          detail: 'trace=$traceId no response after 10 seconds',
+        );
+        unawaited(channel.sink.close());
+        _disconnected('Authentication timed out', generation);
+      });
     } catch (e) {
       _debug('connect.failed', level: 'error', detail: e.toString());
       onStatus(false, e.toString());
@@ -94,6 +123,14 @@ class DaemonClient {
   }
 
   void _onData(dynamic raw) {
+    _debug(
+      'frame.received',
+      detail: raw is String
+          ? 'text ${utf8.encode(raw).length} bytes'
+          : raw is List<int>
+          ? 'binary ${raw.length} bytes'
+          : raw.runtimeType.toString(),
+    );
     if (raw is List<int>) {
       final bytes = Uint8List.fromList(raw);
       if (bytes.length < 17) return;
@@ -118,6 +155,7 @@ class DaemonClient {
           .remove(id)
           ?.completeError(Exception((envelope['error'] as Map)['message']));
       if (id == 'auth') {
+        _authTimer?.cancel();
         final message = (envelope['error'] as Map)['message'] as String?;
         _debug('auth.failed', level: 'error', detail: message);
         onStatus(false, message);
@@ -128,11 +166,14 @@ class DaemonClient {
       final payload = (envelope['payload'] as Map? ?? const {})
           .cast<String, dynamic>();
       if (payload['kind'] == 'hello') {
+        _authTimer?.cancel();
+        final daemon = (payload['daemon'] as Map? ?? const {});
         _debug(
           'hello.received',
           detail: [
-            payload['daemonName'],
-            payload['daemonVersion'],
+            'trace=${payload['clientTraceId'] ?? '-'}',
+            daemon['name'],
+            daemon['version'],
           ].whereType<Object>().join(' '),
         );
         onStatus(true, null);
@@ -230,6 +271,8 @@ class DaemonClient {
 
   void _disconnected(String error, int generation) {
     if (generation != _generation) return;
+    _authTimer?.cancel();
+    _authTimer = null;
     _generation++;
     final subscription = _subscription;
     _subscription = null;
@@ -254,6 +297,8 @@ class DaemonClient {
 
   Future<void> close() async {
     _generation++;
+    _authTimer?.cancel();
+    _authTimer = null;
     final subscription = _subscription;
     final channel = _channel;
     _subscription = null;
