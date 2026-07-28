@@ -4815,34 +4815,31 @@ class _SettingsViewState extends ConsumerState<_SettingsView> {
               leading: const Icon(Icons.dns_outlined),
               title: Text(active.name),
               subtitle: Text(active.url),
-              trailing: Row(
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  IconButton(
-                    tooltip: tr(context, '更新 token', 'Update token'),
-                    onPressed: () => showDialog<void>(
-                      context: context,
-                      builder: (_) => _TokenDialog(connection: active),
+              trailing: IconButton(
+                tooltip: tr(context, '移除连接', 'Remove connection'),
+                onPressed: () async {
+                  if (await _confirm(
+                    context,
+                    tr(
+                      context,
+                      '移除此 daemon 连接？',
+                      'Remove this daemon connection?',
                     ),
-                    icon: const Icon(Icons.key_outlined),
-                  ),
-                  IconButton(
-                    tooltip: tr(context, '移除连接', 'Remove connection'),
-                    onPressed: () async {
-                      if (await _confirm(
-                        context,
-                        tr(
-                          context,
-                          '移除此 daemon 连接？',
-                          'Remove this daemon connection?',
-                        ),
-                      )) {
-                        ctl.removeConnection(active.id);
-                      }
-                    },
-                    icon: const Icon(Icons.delete_outline),
-                  ),
-                ],
+                  )) {
+                    ctl.removeConnection(active.id);
+                  }
+                },
+                icon: const Icon(Icons.delete_outline),
+              ),
+            ),
+          if (active != null)
+            ListTile(
+              leading: const Icon(Icons.key_outlined),
+              title: Text(tr(context, '更新 token', 'Update token')),
+              trailing: const Icon(Icons.chevron_right),
+              onTap: () => showDialog<void>(
+                context: context,
+                builder: (_) => _TokenDialog(connection: active),
               ),
             ),
           if (active != null && isInsecureRemoteDaemonUrl(active.url))
