@@ -11,6 +11,7 @@ import 'package:uuid/uuid.dart';
 import '../models.dart';
 import '../services/connection_url.dart';
 import '../services/daemon_client.dart';
+import '../services/pairing_code.dart';
 
 final appControllerProvider = NotifierProvider<AppController, RizState>(
   AppController.new,
@@ -88,6 +89,19 @@ class AppController extends Notifier<RizState> {
         'token.missing',
         'error',
         'No saved bearer token',
+      );
+      return;
+    }
+    if (connection.usesRelay && relayToken == null) {
+      const error =
+          'Relay credential missing. Update this connection with its pairing code.';
+      _connectionLog(connection.id, 'relay_token.missing', 'error', error);
+      state = state.copyWith(
+        daemonStatuses: {...state.daemonStatuses, connection.id: false},
+        connected: connection.id == state.activeConnectionId
+            ? false
+            : state.connected,
+        error: connection.id == state.activeConnectionId ? error : state.error,
       );
       return;
     }
@@ -263,6 +277,7 @@ class AppController extends Notifier<RizState> {
       id: const Uuid().v4(),
       name: name.trim().isEmpty ? 'Mac' : name.trim(),
       url: normalized,
+      usesRelay: normalizedRelayToken != null,
     );
     final connections = [...state.connections, connection];
     await _secure.write(
@@ -297,6 +312,39 @@ class AppController extends Notifier<RizState> {
     await _secure.write(key: 'riz.token.$id', value: value);
     _connectionLog(id, 'token.updated', 'info', null);
     state = state.copyWith(
+      daemonStatuses: {...state.daemonStatuses, id: false},
+      connected: id == state.activeConnectionId ? false : state.connected,
+      clearError: id == state.activeConnectionId,
+    );
+    await _connectOne(connection);
+  }
+
+  Future<void> updateConnectionPairing(
+    String id,
+    RizPairingCode pairing,
+  ) async {
+    final normalizedUrl = normalizeDaemonUrl(
+      pairing.url,
+      requireSecureWebSocket: kIsWeb && Uri.base.scheme == 'https',
+    );
+    final previous = state.connections.where((item) => item.id == id).first;
+    final connection = DaemonConnection(
+      id: previous.id,
+      name: pairing.name,
+      url: normalizedUrl,
+      usesRelay: true,
+    );
+    final connections = state.connections
+        .map((item) => item.id == id ? connection : item)
+        .toList();
+    _reconnectTimers.remove(id)?.cancel();
+    await _clients.remove(id)?.close();
+    await _secure.write(key: 'riz.token.$id', value: pairing.token);
+    await _secure.write(key: 'riz.relayToken.$id', value: pairing.relayToken);
+    await _saveConnections(connections, state.activeConnectionId);
+    _connectionLog(id, 'pairing.updated', 'info', normalizedUrl);
+    state = state.copyWith(
+      connections: connections,
       daemonStatuses: {...state.daemonStatuses, id: false},
       connected: id == state.activeConnectionId ? false : state.connected,
       clearError: id == state.activeConnectionId,

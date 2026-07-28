@@ -7,6 +7,7 @@ import {
 } from "./protocol";
 
 const MAX_FRAME_BYTES = 26 * 1024 * 1024;
+const CLIENT_PAIRED_MARKER = "riz-relay:client-paired:v1";
 
 interface SocketAttachment {
   role: RelayRole;
@@ -96,6 +97,7 @@ export class RelayRoom extends DurableObject<Env> {
         ...peerAttachment,
         peerId: id,
       } satisfies SocketAttachment);
+      peer.send(CLIENT_PAIRED_MARKER);
     }
     this.ctx.acceptWebSocket(server, [role]);
     return new Response(null, {

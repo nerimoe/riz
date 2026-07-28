@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest";
 import { parseRelayRoute, parseRelayToken } from "../src/protocol";
 
 const token = "A".repeat(43);
+const pairedMarker = "riz-relay:client-paired:v1";
 
 function upgrade(role: "daemon" | "client", candidate = token): Request {
   return new Request("https://relay.test/", {
@@ -81,7 +82,9 @@ describe("RelayRoom", () => {
   it("forwards text and binary frames in both directions", async () => {
     const roomName = crypto.randomUUID();
     const daemon = await connect(roomName, "daemon");
+    const paired = nextMessage(daemon);
     const client = await connect(roomName, "client");
+    expect((await paired).data).toBe(pairedMarker);
 
     const daemonMessage = nextMessage(daemon);
     client.send("hello");
@@ -100,8 +103,12 @@ describe("RelayRoom", () => {
     const roomName = crypto.randomUUID();
     const daemonA = await connect(roomName, "daemon");
     const daemonB = await connect(roomName, "daemon");
+    const pairedA = nextMessage(daemonA);
     const clientA = await connect(roomName, "client");
+    expect((await pairedA).data).toBe(pairedMarker);
+    const pairedB = nextMessage(daemonB);
     const clientB = await connect(roomName, "client");
+    expect((await pairedB).data).toBe(pairedMarker);
 
     const messageA = nextMessage(daemonA);
     const messageB = nextMessage(daemonB);

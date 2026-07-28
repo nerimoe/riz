@@ -5,17 +5,29 @@ class DaemonConnection {
     required this.id,
     required this.name,
     required this.url,
+    this.usesRelay = false,
   });
   final String id;
   final String name;
   final String url;
-  Map<String, Object?> toJson() => {'id': id, 'name': name, 'url': url};
-  factory DaemonConnection.fromJson(Map<String, dynamic> json) =>
-      DaemonConnection(
-        id: json['id'] as String,
-        name: json['name'] as String,
-        url: json['url'] as String,
-      );
+  final bool usesRelay;
+  Map<String, Object?> toJson() => {
+    'id': id,
+    'name': name,
+    'url': url,
+    'usesRelay': usesRelay,
+  };
+  factory DaemonConnection.fromJson(Map<String, dynamic> json) {
+    final url = json['url'] as String;
+    return DaemonConnection(
+      id: json['id'] as String,
+      name: json['name'] as String,
+      url: url,
+      usesRelay:
+          json['usesRelay'] as bool? ??
+          RegExp(r'/v1/relay/[^/]+/client/?$').hasMatch(Uri.parse(url).path),
+    );
+  }
 }
 
 class RizSettings {

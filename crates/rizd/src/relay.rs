@@ -12,7 +12,9 @@ use tokio_tungstenite::{
 use url::Url;
 
 const RELAY_PROTOCOL_PREFIX: &str = "riz-relay-v1.";
+const CLIENT_PAIRED_MARKER: &str = "riz-relay:client-paired:v1";
 const RELAY_CHANNELS: usize = 4;
+const CLIENT_FIRST_FRAME_TIMEOUT: Duration = Duration::from_secs(10);
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -101,11 +103,33 @@ async fn bridge_once(listen: &str, relay: &RelayConfig) -> Result<()> {
                     .send(tokio_tungstenite::tungstenite::Message::Pong(value))
                     .await?;
             }
-            tokio_tungstenite::tungstenite::Message::Close(_) => {
-                return Ok(());
+            tokio_tungstenite::tungstenite::Message::Close(_) => return Ok(()),
+            tokio_tungstenite::tungstenite::Message::Text(value)
+                if value == CLIENT_PAIRED_MARKER =>
+            {
+                break tokio::time::timeout(CLIENT_FIRST_FRAME_TIMEOUT, async {
+                    loop {
+                        match remote_read.next().await.context("relay channel closed")?? {
+                            tokio_tungstenite::tungstenite::Message::Ping(value) => {
+                                remote_write
+                                    .send(tokio_tungstenite::tungstenite::Message::Pong(value))
+                                    .await?;
+                            }
+                            tokio_tungstenite::tungstenite::Message::Close(_) => {
+                                return Ok::<_, anyhow::Error>(None);
+                            }
+                            message => return Ok::<_, anyhow::Error>(Some(message)),
+                        }
+                    }
+                })
+                .await
+                .context("relay client did not send its first frame within 10 seconds")??;
             }
-            message => break message,
+            message => break Some(message),
         }
+    };
+    let Some(first) = first else {
+        return Ok(());
     };
 
     let local_url = format!("ws://{listen}/ws");

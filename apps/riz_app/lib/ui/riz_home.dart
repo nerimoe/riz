@@ -474,31 +474,56 @@ class _TokenDialog extends ConsumerStatefulWidget {
 
 class _TokenDialogState extends ConsumerState<_TokenDialog> {
   final token = TextEditingController();
+  final pairingCode = TextEditingController();
   bool busy = false;
 
   @override
   void dispose() {
     token.dispose();
+    pairingCode.dispose();
     super.dispose();
   }
 
   @override
   Widget build(BuildContext context) => AlertDialog(
-    title: Text(tr(context, '更新 token', 'Update token')),
+    title: Text(
+      widget.connection.usesRelay
+          ? tr(context, '更新配对码', 'Update pairing code')
+          : tr(context, '更新 token', 'Update token'),
+    ),
     content: SizedBox(
       width: 420,
-      child: TextField(
-        selectionControls: rizTextSelectionControls,
-        magnifierConfiguration: rizTextMagnifierConfiguration,
-        controller: token,
-        autofocus: true,
-        obscureText: true,
-        decoration: InputDecoration(
-          labelText: 'Token',
-          helperText: widget.connection.name,
-        ),
-        onSubmitted: busy ? null : (_) => _save(),
-      ),
+      child: widget.connection.usesRelay
+          ? TextField(
+              selectionControls: rizTextSelectionControls,
+              magnifierConfiguration: rizTextMagnifierConfiguration,
+              controller: pairingCode,
+              autofocus: true,
+              autocorrect: false,
+              enableSuggestions: false,
+              decoration: InputDecoration(
+                labelText: tr(context, '完整配对码', 'Full pairing code'),
+                hintText: 'riz1...',
+                helperText: tr(
+                  context,
+                  '同时更新中继地址和两项连接凭据',
+                  'Updates the relay URL and both credentials',
+                ),
+              ),
+              onSubmitted: busy ? null : (_) => _save(),
+            )
+          : TextField(
+              selectionControls: rizTextSelectionControls,
+              magnifierConfiguration: rizTextMagnifierConfiguration,
+              controller: token,
+              autofocus: true,
+              obscureText: true,
+              decoration: InputDecoration(
+                labelText: 'Token',
+                helperText: widget.connection.name,
+              ),
+              onSubmitted: busy ? null : (_) => _save(),
+            ),
     ),
     actions: [
       TextButton(
@@ -518,12 +543,25 @@ class _TokenDialogState extends ConsumerState<_TokenDialog> {
   );
 
   Future<void> _save() async {
-    if (token.text.trim().isEmpty) return;
+    if (widget.connection.usesRelay
+        ? pairingCode.text.trim().isEmpty
+        : token.text.trim().isEmpty) {
+      return;
+    }
     setState(() => busy = true);
     try {
-      await ref
-          .read(appControllerProvider.notifier)
-          .updateConnectionToken(widget.connection.id, token.text);
+      final controller = ref.read(appControllerProvider.notifier);
+      if (widget.connection.usesRelay) {
+        await controller.updateConnectionPairing(
+          widget.connection.id,
+          decodePairingCode(pairingCode.text),
+        );
+      } else {
+        await controller.updateConnectionToken(
+          widget.connection.id,
+          token.text,
+        );
+      }
       if (mounted) Navigator.pop(context);
     } catch (error) {
       if (!mounted) return;
@@ -4924,7 +4962,11 @@ class _SettingsViewState extends ConsumerState<_SettingsView> {
           if (active != null)
             ListTile(
               leading: const Icon(Icons.key_outlined),
-              title: Text(tr(context, '更新 token', 'Update token')),
+              title: Text(
+                active.usesRelay
+                    ? tr(context, '更新配对码', 'Update pairing code')
+                    : tr(context, '更新 token', 'Update token'),
+              ),
               trailing: const Icon(Icons.chevron_right),
               onTap: () => showDialog<void>(
                 context: context,

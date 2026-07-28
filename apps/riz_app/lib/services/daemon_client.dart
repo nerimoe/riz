@@ -59,7 +59,8 @@ class DaemonClient {
   int lastSeq = 0;
 
   Future<void> connect() async {
-    _debug('connect.start', detail: url);
+    final protocolMode = protocols == null ? 'none' : 'relay-v1';
+    _debug('connect.start', detail: '$url protocol=$protocolMode');
     await close();
     final generation = ++_generation;
     try {
