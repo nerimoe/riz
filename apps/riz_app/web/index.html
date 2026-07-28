@@ -41,6 +41,17 @@
     For more details:
     * https://docs.flutter.dev/platform-integration/web/initialization
   -->
-  <script src="flutter_bootstrap.js" async></script>
+  <script>
+    (async () => {
+      if ('serviceWorker' in navigator) {
+        const registrations = await navigator.serviceWorker.getRegistrations();
+        await Promise.all(registrations.map((registration) => registration.unregister()));
+      }
+      const bootstrap = document.createElement('script');
+      bootstrap.src = `flutter_bootstrap.js?v=${Date.now()}`;
+      bootstrap.async = true;
+      document.body.appendChild(bootstrap);
+    })();
+  </script>
 </body>
 </html>
