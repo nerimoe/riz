@@ -65,6 +65,7 @@ pub trait AgentProvider: Send + Sync {
 #[derive(Clone, Default)]
 pub struct AgyProvider {
     running: RunningAgents,
+    model_cache: Arc<Mutex<Vec<Value>>>,
 }
 
 struct RunningAgent {
@@ -86,6 +87,12 @@ impl AgyProvider {
             .map(PathBuf::from)
             .filter(|p| p.exists())
             .or_else(|| which("agy"))
+            .or_else(|| {
+                ["/opt/homebrew/bin/agy", "/usr/local/bin/agy"]
+                    .into_iter()
+                    .map(PathBuf::from)
+                    .find(|path| path.exists())
+            })
             .or_else(|| {
                 dirs::home_dir()
                     .map(|h| h.join(".local/bin/agy"))
@@ -217,14 +224,31 @@ impl AgentProvider for AgyProvider {
     }
     fn models(&self) -> Result<Vec<Value>> {
         let binary = Self::binary().context("agy is not installed")?;
-        let output = Command::new(binary).arg("models").output()?;
-        if !output.status.success() {
-            bail!(
-                "agy models failed: {}",
-                String::from_utf8_lossy(&output.stderr).trim()
-            );
+        let mut last_error = None;
+        for _ in 0..2 {
+            match Command::new(&binary).arg("models").output() {
+                Ok(output) if output.status.success() => {
+                    let models = parse_models(&String::from_utf8_lossy(&output.stdout));
+                    if !models.is_empty() {
+                        *self.model_cache.lock().unwrap() = models.clone();
+                        return Ok(models);
+                    }
+                    last_error = Some("agy models returned no models".to_owned());
+                }
+                Ok(output) => {
+                    last_error = Some(format!(
+                        "agy models failed: {}",
+                        String::from_utf8_lossy(&output.stderr).trim()
+                    ));
+                }
+                Err(error) => last_error = Some(format!("cannot run agy models: {error}")),
+            }
         }
-        Ok(parse_models(&String::from_utf8_lossy(&output.stdout)))
+        let cached = self.model_cache.lock().unwrap().clone();
+        if !cached.is_empty() {
+            return Ok(cached);
+        }
+        bail!(last_error.unwrap_or_else(|| "agy models failed".to_owned()))
     }
     fn history(&self) -> Result<Vec<Value>> {
         let mut out = Vec::new();

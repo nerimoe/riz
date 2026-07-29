@@ -17,6 +17,7 @@ import '../services/connection_url.dart';
 import '../services/file_transfer.dart';
 import '../services/pairing_code.dart';
 import 'adaptive_text_selection.dart';
+import 'adaptive_composer.dart';
 import 'ssh_install_dialog.dart';
 
 String tr(BuildContext context, String zh, String en) =>
@@ -1767,6 +1768,8 @@ class _ChatViewState extends ConsumerState<_ChatView> {
   String? optionSessionId;
   String? selectedModel;
   bool sending = false;
+  bool modelsLoading = true;
+  String? modelsError;
 
   @override
   void initState() {
@@ -1776,41 +1779,79 @@ class _ChatViewState extends ConsumerState<_ChatView> {
   }
 
   Future<void> loadSlashItems() async {
+    await Future.wait([loadCommands(), loadSkills(), loadModels()]);
+  }
+
+  Future<void> loadCommands() async {
     try {
       final commands = await ref
           .read(appControllerProvider.notifier)
           .request('provider.commands');
-      final skills = await ref
-          .read(appControllerProvider.notifier)
-          .request('skill.list');
       slashItems
-        ..clear()
+        ..removeWhere((item) => item['kind'] == 'command')
         ..addAll(
           (commands['commands'] as List).cast<Map>().map(
             (e) => {...e.cast<String, dynamic>(), 'kind': 'command'},
           ),
-        )
+        );
+      if (mounted) setState(() {});
+    } catch (_) {}
+  }
+
+  Future<void> loadSkills() async {
+    try {
+      final skills = await ref
+          .read(appControllerProvider.notifier)
+          .request('skill.list');
+      slashItems
+        ..removeWhere((item) => item['kind'] == 'skill')
         ..addAll(
           (skills['skills'] as List).cast<Map>().map(
             (e) => {...e.cast<String, dynamic>(), 'kind': 'skill'},
           ),
         );
+      if (mounted) setState(() {});
+    } catch (_) {}
+  }
+
+  Future<void> loadModels() async {
+    if (mounted) {
+      setState(() {
+        modelsLoading = true;
+        modelsError = null;
+      });
+    }
+    Object? lastError;
+    for (var attempt = 0; attempt < 3; attempt++) {
       try {
         final response = await ref
             .read(appControllerProvider.notifier)
             .request('provider.models');
+        final loaded = (response['models'] as List)
+            .cast<Map>()
+            .map((model) => model.cast<String, dynamic>())
+            .toList();
+        if (loaded.isEmpty) throw StateError('provider returned no models');
         models
           ..clear()
-          ..addAll(
-            (response['models'] as List).cast<Map>().map(
-              (model) => model.cast<String, dynamic>(),
-            ),
-          );
-      } catch (_) {
-        models.clear();
+          ..addAll(loaded);
+        if (mounted) {
+          setState(() {
+            modelsLoading = false;
+            modelsError = null;
+          });
+        }
+        return;
+      } catch (error) {
+        lastError = error;
       }
-      if (mounted) setState(() {});
-    } catch (_) {}
+    }
+    if (mounted) {
+      setState(() {
+        modelsLoading = false;
+        modelsError = lastError.toString();
+      });
+    }
   }
 
   @override
@@ -2126,30 +2167,15 @@ class _ChatViewState extends ConsumerState<_ChatView> {
                                 ),
                           ),
                         ),
-                      TextField(
-                        selectionControls: rizTextSelectionControls,
-                        magnifierConfiguration: rizTextMagnifierConfiguration,
+                      AdaptiveComposerField(
                         controller: composer,
-                        minLines: 1,
-                        maxLines: 7,
-                        decoration: InputDecoration(
-                          hintText: running
-                              ? tr(context, '排队下一条消息…', 'Queue a follow-up…')
-                              : tr(
-                                  context,
-                                  '发送消息或 / 命令…',
-                                  'Message or / command…',
-                                ),
-                          border: InputBorder.none,
-                          enabledBorder: InputBorder.none,
-                          focusedBorder: InputBorder.none,
-                          contentPadding: const EdgeInsets.fromLTRB(
-                            14,
-                            12,
-                            14,
-                            8,
-                          ),
-                        ),
+                        hintText: running
+                            ? tr(context, '排队下一条消息…', 'Queue a follow-up…')
+                            : tr(
+                                context,
+                                '发送消息或 / 命令…',
+                                'Message or / command…',
+                              ),
                       ),
                       Row(
                         children: [
@@ -2213,10 +2239,22 @@ class _ChatViewState extends ConsumerState<_ChatView> {
                                 selectedModel ??
                                 tr(context, '默认模型', 'Default model'),
                             initialValue: selectedModel ?? '',
-                            onSelected: (value) => setState(
-                              () =>
-                                  selectedModel = value.isEmpty ? null : value,
-                            ),
+                            onOpened: () {
+                              if (models.isEmpty && !modelsLoading) {
+                                loadModels();
+                              }
+                            },
+                            onSelected: (value) {
+                              if (value == '__retry__') {
+                                loadModels();
+                                return;
+                              }
+                              setState(
+                                () => selectedModel = value.isEmpty
+                                    ? null
+                                    : value,
+                              );
+                            },
                             child: ConstrainedBox(
                               constraints: const BoxConstraints(maxWidth: 190),
                               child: Padding(
@@ -2265,6 +2303,41 @@ class _ChatViewState extends ConsumerState<_ChatView> {
                                   value: model['id'] as String,
                                   checked: selectedModel == model['id'],
                                   child: Text(model['name'] as String),
+                                ),
+                              if (modelsLoading && models.isEmpty)
+                                PopupMenuItem<String>(
+                                  enabled: false,
+                                  child: Row(
+                                    children: [
+                                      const SizedBox.square(
+                                        dimension: 16,
+                                        child: CircularProgressIndicator(
+                                          strokeWidth: 2,
+                                        ),
+                                      ),
+                                      const SizedBox(width: 12),
+                                      Text(
+                                        tr(
+                                          context,
+                                          '正在获取模型…',
+                                          'Loading models…',
+                                        ),
+                                      ),
+                                    ],
+                                  ),
+                                ),
+                              if (modelsError != null && models.isEmpty)
+                                PopupMenuItem<String>(
+                                  value: '__retry__',
+                                  child: Row(
+                                    children: [
+                                      const Icon(Icons.refresh, size: 18),
+                                      const SizedBox(width: 10),
+                                      Text(
+                                        tr(context, '获取失败，重试', 'Failed, retry'),
+                                      ),
+                                    ],
+                                  ),
                                 ),
                             ],
                           ),
