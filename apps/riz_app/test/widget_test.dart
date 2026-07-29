@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
@@ -128,6 +130,25 @@ class _DraftController extends _ProjectOnlyController {
       'permissionMode': 'workspace',
     },
   );
+}
+
+class _DelayedModelsController extends _DraftController {
+  final models = Completer<Map<String, dynamic>>();
+  var modelRequests = 0;
+
+  @override
+  Future<Map<String, dynamic>> request(
+    String method, [
+    Map<String, dynamic> params = const {},
+  ]) async {
+    if (method == 'provider.models') {
+      modelRequests++;
+      return models.future;
+    }
+    if (method == 'provider.commands') return {'commands': <Object>[]};
+    if (method == 'skill.list') return {'skills': <Object>[]};
+    throw StateError('unexpected request: $method');
+  }
 }
 
 class _FailedFirstSendController extends _DraftController {
@@ -356,6 +377,31 @@ void main() {
     expect(find.text('Default model'), findsOneWidget);
   });
 
+  testWidgets('model menu waits for models before it opens', (tester) async {
+    final controller = _DelayedModelsController();
+    await tester.pumpWidget(
+      ProviderScope(
+        overrides: [appControllerProvider.overrideWith(() => controller)],
+        child: const MaterialApp(home: RizHome()),
+      ),
+    );
+    await tester.pump();
+
+    await tester.tap(find.text('Default model'));
+    await tester.pump();
+    expect(find.byType(CheckedPopupMenuItem<String>), findsNothing);
+
+    controller.models.complete({
+      'models': [
+        {'id': 'gemini-test', 'name': 'Gemini Test'},
+      ],
+    });
+    await tester.pumpAndSettle();
+
+    expect(find.text('Gemini Test'), findsOneWidget);
+    expect(controller.modelRequests, 1);
+  });
+
   testWidgets('first screen starts in a loading state', (tester) async {
     await tester.pumpWidget(
       const ProviderScope(child: MaterialApp(home: RizHome())),
@@ -483,7 +529,7 @@ void main() {
     );
     await tester.pump();
 
-    expect(find.text('Version 1.0.0+10'), findsOneWidget);
+    expect(find.text('Version 1.0.0+11'), findsOneWidget);
     expect(find.text('Current version: 0.1.0'), findsOneWidget);
     await tester.tap(find.widgetWithText(OutlinedButton, 'Check for updates'));
     await tester.pump();

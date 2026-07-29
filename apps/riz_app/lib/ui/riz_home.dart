@@ -1770,6 +1770,7 @@ class _ChatViewState extends ConsumerState<_ChatView> {
   bool sending = false;
   bool modelsLoading = true;
   String? modelsError;
+  Future<void>? modelLoad;
 
   @override
   void initState() {
@@ -1814,7 +1815,18 @@ class _ChatViewState extends ConsumerState<_ChatView> {
     } catch (_) {}
   }
 
-  Future<void> loadModels() async {
+  Future<void> loadModels() {
+    final active = modelLoad;
+    if (active != null) return active;
+    late final Future<void> tracked;
+    tracked = _loadModels().whenComplete(() {
+      if (identical(modelLoad, tracked)) modelLoad = null;
+    });
+    modelLoad = tracked;
+    return tracked;
+  }
+
+  Future<void> _loadModels() async {
     if (mounted) {
       setState(() {
         modelsLoading = true;
@@ -1852,6 +1864,56 @@ class _ChatViewState extends ConsumerState<_ChatView> {
         modelsError = lastError.toString();
       });
     }
+  }
+
+  Future<void> openModelMenu(BuildContext anchorContext) async {
+    if (models.isEmpty) await loadModels();
+    if (!mounted || !anchorContext.mounted) return;
+
+    final anchor = anchorContext.findRenderObject() as RenderBox?;
+    final overlay =
+        Overlay.of(context).context.findRenderObject() as RenderBox?;
+    if (anchor == null || overlay == null) return;
+    final offset = anchor.localToGlobal(Offset.zero, ancestor: overlay);
+    final selection = await showMenu<String>(
+      context: context,
+      initialValue: selectedModel ?? '',
+      position: RelativeRect.fromRect(
+        offset & anchor.size,
+        Offset.zero & overlay.size,
+      ),
+      items: [
+        CheckedPopupMenuItem(
+          value: '',
+          checked: selectedModel == null,
+          child: Text(tr(context, '默认模型', 'Default model')),
+        ),
+        for (final model in models)
+          CheckedPopupMenuItem(
+            value: model['id'] as String,
+            checked: selectedModel == model['id'],
+            child: Text(model['name'] as String),
+          ),
+        if (modelsError != null && models.isEmpty)
+          PopupMenuItem<String>(
+            value: '__retry__',
+            child: Row(
+              children: [
+                const Icon(Icons.refresh, size: 18),
+                const SizedBox(width: 10),
+                Text(tr(context, '获取失败，重试', 'Failed, retry')),
+              ],
+            ),
+          ),
+      ],
+    );
+    if (!mounted || selection == null) return;
+    if (selection == '__retry__') {
+      await loadModels();
+      if (anchorContext.mounted) await openModelMenu(anchorContext);
+      return;
+    }
+    setState(() => selectedModel = selection.isEmpty ? null : selection);
   }
 
   @override
@@ -2234,112 +2296,65 @@ class _ChatViewState extends ConsumerState<_ChatView> {
                               ),
                             ],
                           ),
-                          PopupMenuButton<String>(
-                            tooltip:
-                                selectedModel ??
-                                tr(context, '默认模型', 'Default model'),
-                            initialValue: selectedModel ?? '',
-                            onOpened: () {
-                              if (models.isEmpty && !modelsLoading) {
-                                loadModels();
-                              }
-                            },
-                            onSelected: (value) {
-                              if (value == '__retry__') {
-                                loadModels();
-                                return;
-                              }
-                              setState(
-                                () => selectedModel = value.isEmpty
-                                    ? null
-                                    : value,
-                              );
-                            },
-                            child: ConstrainedBox(
-                              constraints: const BoxConstraints(maxWidth: 190),
-                              child: Padding(
-                                padding: const EdgeInsets.symmetric(
-                                  horizontal: 8,
-                                  vertical: 10,
-                                ),
-                                child: Row(
-                                  mainAxisSize: MainAxisSize.min,
-                                  children: [
-                                    Icon(
-                                      selectedModel == null
-                                          ? Icons.model_training_outlined
-                                          : Icons.model_training,
-                                      size: 20,
+                          Builder(
+                            builder: (buttonContext) => Tooltip(
+                              message:
+                                  selectedModel ??
+                                  tr(context, '默认模型', 'Default model'),
+                              child: InkWell(
+                                borderRadius: BorderRadius.circular(8),
+                                onTap: () => openModelMenu(buttonContext),
+                                child: ConstrainedBox(
+                                  constraints: const BoxConstraints(
+                                    maxWidth: 190,
+                                    minHeight: 48,
+                                  ),
+                                  child: Padding(
+                                    padding: const EdgeInsets.symmetric(
+                                      horizontal: 8,
                                     ),
-                                    const SizedBox(width: 6),
-                                    Flexible(
-                                      child: Text(
-                                        selectedModel ??
-                                            tr(
-                                              context,
-                                              '默认模型',
-                                              'Default model',
+                                    child: Row(
+                                      mainAxisSize: MainAxisSize.min,
+                                      children: [
+                                        Icon(
+                                          selectedModel == null
+                                              ? Icons.model_training_outlined
+                                              : Icons.model_training,
+                                          size: 20,
+                                        ),
+                                        const SizedBox(width: 6),
+                                        Flexible(
+                                          child: Text(
+                                            selectedModel ??
+                                                tr(
+                                                  context,
+                                                  '默认模型',
+                                                  'Default model',
+                                                ),
+                                            maxLines: 1,
+                                            overflow: TextOverflow.ellipsis,
+                                            style: context.text.labelMedium,
+                                          ),
+                                        ),
+                                        const SizedBox(width: 4),
+                                        if (modelsLoading && models.isEmpty)
+                                          const SizedBox.square(
+                                            dimension: 14,
+                                            child: CircularProgressIndicator(
+                                              strokeWidth: 2,
                                             ),
-                                        maxLines: 1,
-                                        overflow: TextOverflow.ellipsis,
-                                        style: context.text.labelMedium,
-                                      ),
+                                          )
+                                        else
+                                          const Icon(
+                                            Icons.arrow_drop_down,
+                                            size: 18,
+                                          ),
+                                      ],
                                     ),
-                                    const Icon(Icons.arrow_drop_down, size: 18),
-                                  ],
+                                  ),
                                 ),
                               ),
                             ),
-                            itemBuilder: (context) => [
-                              CheckedPopupMenuItem(
-                                value: '',
-                                checked: selectedModel == null,
-                                child: Text(
-                                  tr(context, '默认模型', 'Default model'),
-                                ),
-                              ),
-                              for (final model in models)
-                                CheckedPopupMenuItem(
-                                  value: model['id'] as String,
-                                  checked: selectedModel == model['id'],
-                                  child: Text(model['name'] as String),
-                                ),
-                              if (modelsLoading && models.isEmpty)
-                                PopupMenuItem<String>(
-                                  enabled: false,
-                                  child: Row(
-                                    children: [
-                                      const SizedBox.square(
-                                        dimension: 16,
-                                        child: CircularProgressIndicator(
-                                          strokeWidth: 2,
-                                        ),
-                                      ),
-                                      const SizedBox(width: 12),
-                                      Text(
-                                        tr(
-                                          context,
-                                          '正在获取模型…',
-                                          'Loading models…',
-                                        ),
-                                      ),
-                                    ],
-                                  ),
-                                ),
-                              if (modelsError != null && models.isEmpty)
-                                PopupMenuItem<String>(
-                                  value: '__retry__',
-                                  child: Row(
-                                    children: [
-                                      const Icon(Icons.refresh, size: 18),
-                                      const SizedBox(width: 10),
-                                      Text(
-                                        tr(context, '获取失败，重试', 'Failed, retry'),
-                                      ),
-                                    ],
-                                  ),
-                                ),
-                            ],
                           ),
                           const Spacer(),
                           if (running)
