@@ -1221,7 +1221,7 @@ class _QuotaSidebarItemState extends ConsumerState<_QuotaSidebarItem> {
 
   @override
   Widget build(BuildContext context) {
-    final quota = ref.watch(appControllerProvider).snapshot['quota'] as Map?;
+    final quota = ref.watch(appControllerProvider).activeDaemonGlobals?.quota;
     final snapshot = quota?['snapshot'] as Map?;
     final values = (snapshot?['remainingPercentages'] as List? ?? const [])
         .whereType<num>()
@@ -1761,114 +1761,26 @@ class _ChatViewState extends ConsumerState<_ChatView> {
   final composer = TextEditingController();
   final scroll = ScrollController();
   final attachments = <Map<String, dynamic>>[];
-  final slashItems = <Map<String, dynamic>>[];
-  final models = <Map<String, dynamic>>[];
   String delivery = 'queue';
-  String? slashContext;
   String? optionSessionId;
   String? selectedModel;
   bool sending = false;
-  bool modelsLoading = true;
-  String? modelsError;
-  Future<void>? modelLoad;
 
   @override
   void initState() {
     super.initState();
     composer.addListener(() => setState(() {}));
-    Future.microtask(loadSlashItems);
-  }
-
-  Future<void> loadSlashItems() async {
-    await Future.wait([loadCommands(), loadSkills(), loadModels()]);
-  }
-
-  Future<void> loadCommands() async {
-    try {
-      final commands = await ref
-          .read(appControllerProvider.notifier)
-          .request('provider.commands');
-      slashItems
-        ..removeWhere((item) => item['kind'] == 'command')
-        ..addAll(
-          (commands['commands'] as List).cast<Map>().map(
-            (e) => {...e.cast<String, dynamic>(), 'kind': 'command'},
-          ),
-        );
-      if (mounted) setState(() {});
-    } catch (_) {}
-  }
-
-  Future<void> loadSkills() async {
-    try {
-      final skills = await ref
-          .read(appControllerProvider.notifier)
-          .request('skill.list');
-      slashItems
-        ..removeWhere((item) => item['kind'] == 'skill')
-        ..addAll(
-          (skills['skills'] as List).cast<Map>().map(
-            (e) => {...e.cast<String, dynamic>(), 'kind': 'skill'},
-          ),
-        );
-      if (mounted) setState(() {});
-    } catch (_) {}
-  }
-
-  Future<void> loadModels() {
-    final active = modelLoad;
-    if (active != null) return active;
-    late final Future<void> tracked;
-    tracked = _loadModels().whenComplete(() {
-      if (identical(modelLoad, tracked)) modelLoad = null;
-    });
-    modelLoad = tracked;
-    return tracked;
-  }
-
-  Future<void> _loadModels() async {
-    if (mounted) {
-      setState(() {
-        modelsLoading = true;
-        modelsError = null;
-      });
-    }
-    Object? lastError;
-    for (var attempt = 0; attempt < 3; attempt++) {
-      try {
-        final response = await ref
-            .read(appControllerProvider.notifier)
-            .request('provider.models');
-        final loaded = (response['models'] as List)
-            .cast<Map>()
-            .map((model) => model.cast<String, dynamic>())
-            .toList();
-        if (loaded.isEmpty) throw StateError('provider returned no models');
-        models
-          ..clear()
-          ..addAll(loaded);
-        if (mounted) {
-          setState(() {
-            modelsLoading = false;
-            modelsError = null;
-          });
-        }
-        return;
-      } catch (error) {
-        lastError = error;
-      }
-    }
-    if (mounted) {
-      setState(() {
-        modelsLoading = false;
-        modelsError = lastError.toString();
-      });
-    }
   }
 
   Future<void> openModelMenu(BuildContext anchorContext) async {
-    if (models.isEmpty) await loadModels();
+    var globals = ref.read(appControllerProvider).activeDaemonGlobals;
+    if (globals == null || globals.models.isEmpty) {
+      await ref.read(appControllerProvider.notifier).loadDaemonGlobals();
+      globals = ref.read(appControllerProvider).activeDaemonGlobals;
+    }
     if (!mounted || !anchorContext.mounted) return;
+    final models = globals?.models ?? const <Map<String, dynamic>>[];
+    final modelsError = globals?.error;
 
     final anchor = anchorContext.findRenderObject() as RenderBox?;
     final overlay =
@@ -1909,7 +1821,9 @@ class _ChatViewState extends ConsumerState<_ChatView> {
     );
     if (!mounted || selection == null) return;
     if (selection == '__retry__') {
-      await loadModels();
+      await ref
+          .read(appControllerProvider.notifier)
+          .loadDaemonGlobals(force: true);
       if (anchorContext.mounted) await openModelMenu(anchorContext);
       return;
     }
@@ -2001,14 +1915,11 @@ class _ChatViewState extends ConsumerState<_ChatView> {
       optionSessionId = session['id'] as String;
       selectedModel = null;
     }
-    final nextSlashContext =
-        '${state.activeConnectionId}:${state.connected}:${state.selectedProjectId}';
-    if (slashContext != nextSlashContext) {
-      slashContext = nextSlashContext;
-      WidgetsBinding.instance.addPostFrameCallback((_) {
-        if (mounted) loadSlashItems();
-      });
-    }
+    final globals = state.activeDaemonGlobals ?? const DaemonGlobalData();
+    final slashItems = [
+      for (final command in globals.commands) {...command, 'kind': 'command'},
+      for (final skill in globals.globalSkills) {...skill, 'kind': 'skill'},
+    ];
     ref.listen(
       appControllerProvider.select(
         (value) => (value.selectedSessionId, value.messages.length),
@@ -2337,7 +2248,8 @@ class _ChatViewState extends ConsumerState<_ChatView> {
                                           ),
                                         ),
                                         const SizedBox(width: 4),
-                                        if (modelsLoading && models.isEmpty)
+                                        if (globals.loading &&
+                                            globals.models.isEmpty)
                                           const SizedBox.square(
                                             dimension: 14,
                                             child: CircularProgressIndicator(
@@ -4356,10 +4268,23 @@ class _SkillsViewState extends ConsumerState<_SkillsView> {
   @override
   void initState() {
     super.initState();
-    load();
+    if (widget.projectPath == null) {
+      loading = false;
+      Future.microtask(
+        () => ref.read(appControllerProvider.notifier).loadDaemonGlobals(),
+      );
+    } else {
+      load();
+    }
   }
 
   Future<void> load() async {
+    if (widget.projectPath == null) {
+      await ref
+          .read(appControllerProvider.notifier)
+          .loadDaemonGlobals(force: true);
+      return;
+    }
     setState(() => loading = true);
     try {
       final v = await ref.read(appControllerProvider.notifier).request(
@@ -4421,115 +4346,126 @@ class _SkillsViewState extends ConsumerState<_SkillsView> {
   }
 
   @override
-  Widget build(BuildContext context) => _PageFrame(
-    title: widget.projectPath == null
-        ? tr(context, '全局 Skills', 'Global skills')
-        : tr(context, '项目 Skills', 'Project skills'),
-    actions: [
-      IconButton(
-        tooltip: tr(context, '从 Git 安装', 'Install from Git'),
-        onPressed: installGit,
-        icon: const Icon(Icons.download_outlined),
-      ),
-      IconButton(
-        tooltip: tr(context, '新建 Skill', 'New skill'),
-        onPressed: edit,
-        icon: const Icon(Icons.add),
-      ),
-    ],
-    child: loading
-        ? const Center(child: CircularProgressIndicator())
-        : skills.isEmpty
-        ? _EmptyState(
-            icon: Icons.extension_off_outlined,
-            label: tr(context, '还没有 Skills', 'No skills installed'),
-          )
-        : ListView.builder(
-            itemCount: skills.length,
-            itemBuilder: (context, i) {
-              final s = skills[i];
-              final enabled = s['enabled'] == true;
-              return ListTile(
-                leading: Icon(
-                  enabled
-                      ? Icons.extension_outlined
-                      : Icons.extension_off_outlined,
-                ),
-                title: Text(
-                  s['name'],
-                  style: enabled
-                      ? null
-                      : TextStyle(color: context.colors.onSurfaceVariant),
-                ),
-                subtitle: Text(
-                  s['description'] ?? '',
-                  maxLines: 2,
-                  style: enabled
-                      ? null
-                      : TextStyle(color: context.colors.outline),
-                ),
-                onTap: () => edit(s),
-                trailing: Row(
-                  mainAxisSize: MainAxisSize.min,
-                  children: [
-                    Tooltip(
-                      message: enabled
-                          ? tr(context, '停用', 'Disable')
-                          : tr(context, '启用', 'Enable'),
-                      child: Switch(
-                        value: enabled,
-                        onChanged: (value) async {
-                          await ref
-                              .read(appControllerProvider.notifier)
-                              .request('skill.toggle', {
-                                'path': s['path'],
-                                'enabled': value,
-                              });
-                          await load();
-                        },
-                      ),
-                    ),
-                    PopupMenuButton<String>(
-                      onSelected: (v) async {
-                        if (v == 'update') {
-                          await ref
-                              .read(appControllerProvider.notifier)
-                              .request('skill.git.update', {'path': s['path']});
-                          await load();
-                        } else if (v == 'delete') {
-                          if (!context.mounted) return;
-                          final confirmed = await _confirm(
-                            context,
-                            tr(context, '删除此 Skill？', 'Delete this skill?'),
-                          );
-                          if (confirmed) {
+  Widget build(BuildContext context) {
+    final globals = ref.watch(appControllerProvider).activeDaemonGlobals;
+    final visibleSkills = widget.projectPath == null
+        ? globals?.globalSkills ?? const <Map<String, dynamic>>[]
+        : skills;
+    final visibleLoading = widget.projectPath == null
+        ? globals?.loading ?? true
+        : loading;
+    return _PageFrame(
+      title: widget.projectPath == null
+          ? tr(context, '全局 Skills', 'Global skills')
+          : tr(context, '项目 Skills', 'Project skills'),
+      actions: [
+        IconButton(
+          tooltip: tr(context, '从 Git 安装', 'Install from Git'),
+          onPressed: installGit,
+          icon: const Icon(Icons.download_outlined),
+        ),
+        IconButton(
+          tooltip: tr(context, '新建 Skill', 'New skill'),
+          onPressed: edit,
+          icon: const Icon(Icons.add),
+        ),
+      ],
+      child: visibleLoading
+          ? const Center(child: CircularProgressIndicator())
+          : visibleSkills.isEmpty
+          ? _EmptyState(
+              icon: Icons.extension_off_outlined,
+              label: tr(context, '还没有 Skills', 'No skills installed'),
+            )
+          : ListView.builder(
+              itemCount: visibleSkills.length,
+              itemBuilder: (context, i) {
+                final s = visibleSkills[i];
+                final enabled = s['enabled'] == true;
+                return ListTile(
+                  leading: Icon(
+                    enabled
+                        ? Icons.extension_outlined
+                        : Icons.extension_off_outlined,
+                  ),
+                  title: Text(
+                    s['name'],
+                    style: enabled
+                        ? null
+                        : TextStyle(color: context.colors.onSurfaceVariant),
+                  ),
+                  subtitle: Text(
+                    s['description'] ?? '',
+                    maxLines: 2,
+                    style: enabled
+                        ? null
+                        : TextStyle(color: context.colors.outline),
+                  ),
+                  onTap: () => edit(s),
+                  trailing: Row(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      Tooltip(
+                        message: enabled
+                            ? tr(context, '停用', 'Disable')
+                            : tr(context, '启用', 'Enable'),
+                        child: Switch(
+                          value: enabled,
+                          onChanged: (value) async {
                             await ref
                                 .read(appControllerProvider.notifier)
-                                .request('skill.delete', {'path': s['path']});
+                                .request('skill.toggle', {
+                                  'path': s['path'],
+                                  'enabled': value,
+                                });
                             await load();
-                          }
-                        }
-                      },
-                      itemBuilder: (_) => [
-                        if (s['source'] != null)
-                          PopupMenuItem(
-                            value: 'update',
-                            child: Text(
-                              tr(context, '从 Git 更新', 'Update from Git'),
-                            ),
-                          ),
-                        PopupMenuItem(
-                          value: 'delete',
-                          child: Text(tr(context, '删除', 'Delete')),
+                          },
                         ),
-                      ],
-                    ),
-                  ],
-                ),
-              );
-            },
-          ),
-  );
+                      ),
+                      PopupMenuButton<String>(
+                        onSelected: (v) async {
+                          if (v == 'update') {
+                            await ref
+                                .read(appControllerProvider.notifier)
+                                .request('skill.git.update', {
+                                  'path': s['path'],
+                                });
+                            await load();
+                          } else if (v == 'delete') {
+                            if (!context.mounted) return;
+                            final confirmed = await _confirm(
+                              context,
+                              tr(context, '删除此 Skill？', 'Delete this skill?'),
+                            );
+                            if (confirmed) {
+                              await ref
+                                  .read(appControllerProvider.notifier)
+                                  .request('skill.delete', {'path': s['path']});
+                              await load();
+                            }
+                          }
+                        },
+                        itemBuilder: (_) => [
+                          if (s['source'] != null)
+                            PopupMenuItem(
+                              value: 'update',
+                              child: Text(
+                                tr(context, '从 Git 更新', 'Update from Git'),
+                              ),
+                            ),
+                          PopupMenuItem(
+                            value: 'delete',
+                            child: Text(tr(context, '删除', 'Delete')),
+                          ),
+                        ],
+                      ),
+                    ],
+                  ),
+                );
+              },
+            ),
+    );
+  }
 }
 
 class _SkillEditorDialog extends ConsumerStatefulWidget {
@@ -4645,7 +4581,7 @@ class _QuotaViewState extends ConsumerState<_QuotaView> {
 
   @override
   Widget build(BuildContext context) {
-    final quota = ref.watch(appControllerProvider).snapshot['quota'] as Map?;
+    final quota = ref.watch(appControllerProvider).activeDaemonGlobals?.quota;
     final snapshot = quota?['snapshot'] as Map?;
     final percentages = (snapshot?['remainingPercentages'] as List? ?? const [])
         .map((e) => (e as num).toDouble())

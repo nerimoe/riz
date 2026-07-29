@@ -17,6 +17,19 @@ final appControllerProvider = NotifierProvider<AppController, RizState>(
   AppController.new,
 );
 
+class _SessionMemoryCache {
+  _SessionMemoryCache({
+    required this.messages,
+    this.pendingPermission,
+    this.pendingInput,
+  });
+
+  List<Map<String, dynamic>> messages;
+  Map<String, dynamic>? pendingPermission;
+  Map<String, dynamic>? pendingInput;
+  bool dirty = false;
+}
+
 class AppController extends Notifier<RizState> {
   static const _connectionsKey = 'riz.connections';
   static const _activeKey = 'riz.activeConnection';
@@ -26,7 +39,12 @@ class AppController extends Notifier<RizState> {
   final _clients = <String, DaemonClient>{};
   final _reconnectTimers = <String, Timer>{};
   final _terminalListeners = <String, void Function(Uint8List)>{};
+  final _globalLoads = <String, Future<void>>{};
+  final _sessionCaches = <String, Map<String, _SessionMemoryCache>>{};
+  final _sessionLoads = <String, Future<void>>{};
+  final _sessionVersions = <String, int>{};
   Timer? _refreshTimer;
+  Timer? _sessionRefreshTimer;
 
   @override
   RizState build() {
@@ -35,6 +53,7 @@ class AppController extends Notifier<RizState> {
         unawaited(client.close());
       }
       _refreshTimer?.cancel();
+      _sessionRefreshTimer?.cancel();
       for (final timer in _reconnectTimers.values) {
         timer.cancel();
       }
@@ -77,6 +96,94 @@ class AppController extends Notifier<RizState> {
   DaemonClient? get client => state.activeConnectionId == null
       ? null
       : _clients[state.activeConnectionId];
+
+  Future<void> loadDaemonGlobals({String? connectionId, bool force = false}) {
+    final id = connectionId ?? state.activeConnectionId;
+    if (id == null) return Future.value();
+    final existing = state.daemonGlobals[id];
+    if (!force && existing?.loaded == true) return Future.value();
+    final active = _globalLoads[id];
+    if (active != null) return active;
+
+    late final Future<void> tracked;
+    tracked = _loadDaemonGlobals(id).whenComplete(() {
+      if (identical(_globalLoads[id], tracked)) _globalLoads.remove(id);
+    });
+    _globalLoads[id] = tracked;
+    return tracked;
+  }
+
+  Future<void> _loadDaemonGlobals(String connectionId) async {
+    final daemon = _clients[connectionId];
+    if (daemon == null) return;
+    final previous =
+        state.daemonGlobals[connectionId] ?? const DaemonGlobalData();
+    _setDaemonGlobals(
+      connectionId,
+      previous.copyWith(loading: true, clearError: true),
+    );
+
+    final results = await Future.wait([
+      _loadGlobalList(daemon, 'provider.models', 'models'),
+      _loadGlobalList(daemon, 'provider.commands', 'commands'),
+      _loadGlobalList(daemon, 'skill.list', 'skills'),
+    ]);
+    if (_clients[connectionId] != daemon) return;
+
+    List<Map<String, dynamic>>? models;
+    List<Map<String, dynamic>>? commands;
+    List<Map<String, dynamic>>? skills;
+    final errors = <String>[];
+    for (final result in results) {
+      if (result.error != null) {
+        errors.add('${result.key}: ${result.error}');
+      } else if (result.key == 'models') {
+        models = result.values;
+      } else if (result.key == 'commands') {
+        commands = result.values;
+      } else if (result.key == 'skills') {
+        skills = result.values
+            .where((skill) => skill['scope'] == 'global')
+            .toList();
+      }
+    }
+    final current = state.daemonGlobals[connectionId] ?? previous;
+    _setDaemonGlobals(
+      connectionId,
+      current.copyWith(
+        loading: false,
+        loaded: errors.isEmpty,
+        models: models,
+        commands: commands,
+        globalSkills: skills,
+        error: errors.isEmpty ? null : errors.join('\n'),
+        clearError: errors.isEmpty,
+      ),
+    );
+  }
+
+  Future<({String key, List<Map<String, dynamic>> values, Object? error})>
+  _loadGlobalList(DaemonClient daemon, String method, String key) async {
+    try {
+      final response = await daemon.request(method);
+      return (
+        key: key,
+        values: (response[key] as List? ?? const [])
+            .cast<Map>()
+            .map((value) => value.cast<String, dynamic>())
+            .toList(),
+        error: null,
+      );
+    } catch (error) {
+      return (key: key, values: const <Map<String, dynamic>>[], error: error);
+    }
+  }
+
+  void _setDaemonGlobals(String connectionId, DaemonGlobalData data) {
+    state = state.copyWith(
+      daemonGlobals: {...state.daemonGlobals, connectionId: data},
+    );
+  }
 
   Future<void> _connectOne(DaemonConnection connection) async {
     final token = await _secure.read(key: 'riz.token.${connection.id}');
@@ -124,6 +231,9 @@ class AppController extends Notifier<RizState> {
         );
         if (connected) {
           _reconnectTimers.remove(connection.id)?.cancel();
+          unawaited(
+            loadDaemonGlobals(connectionId: connection.id, force: true),
+          );
         } else if (_clients[connection.id] == daemon &&
             !_reconnectTimers.containsKey(connection.id)) {
           _reconnectTimers[connection.id] = Timer(
@@ -175,23 +285,92 @@ class AppController extends Notifier<RizState> {
   }
 
   void _event(String connectionId, String topic, dynamic data) {
-    if (connectionId != state.activeConnectionId) return;
     if (topic == 'snapshot' && data is Map) {
-      state = state.copyWith(snapshot: data.cast<String, dynamic>());
+      for (final cache
+          in _sessionCaches[connectionId]?.values ??
+              const <_SessionMemoryCache>[]) {
+        cache.dirty = true;
+      }
+      if (connectionId == state.activeConnectionId) {
+        final snapshot = data.cast<String, dynamic>();
+        state = state.copyWith(snapshot: snapshot);
+        _cacheQuota(connectionId, snapshot['quota']);
+        final selected = state.selectedSessionId;
+        if (selected != null) {
+          markSessionDirty(selected, connectionId: connectionId);
+        }
+      }
       return;
     }
+    _applySessionEvent(connectionId, topic, data);
+    if (connectionId != state.activeConnectionId) return;
     _refreshTimer?.cancel();
     _refreshTimer = Timer(const Duration(milliseconds: 120), () async {
       await refresh();
-      if (state.selectedSessionId != null) {
-        await selectSession(state.selectedSessionId);
-      }
     });
+  }
+
+  void _applySessionEvent(String connectionId, String topic, dynamic data) {
+    if (data is! Map) return;
+    final value = data.cast<String, dynamic>();
+    if (topic == 'message.changed') {
+      final sessionId = value['sessionId'] as String?;
+      final cache = sessionId == null
+          ? null
+          : _sessionCaches[connectionId]?[sessionId];
+      if (cache == null) return;
+      final index = cache.messages.indexWhere(
+        (message) => message['id'] == value['id'],
+      );
+      if (index < 0) {
+        cache.messages = [...cache.messages, value];
+      } else {
+        cache.messages = [...cache.messages]..[index] = value;
+      }
+      _showCachedSession(connectionId, sessionId!, cache);
+      return;
+    }
+    if (topic == 'message.removed') {
+      final messageId = value['id'];
+      for (final entry
+          in _sessionCaches[connectionId]?.entries ??
+              const <MapEntry<String, _SessionMemoryCache>>[]) {
+        if (entry.value.messages.any((message) => message['id'] == messageId)) {
+          entry.value.messages = entry.value.messages
+              .where((message) => message['id'] != messageId)
+              .toList();
+          _showCachedSession(connectionId, entry.key, entry.value);
+          break;
+        }
+      }
+      return;
+    }
+    final sessionId =
+        (value['sessionId'] ??
+                (topic.startsWith('session.') ? value['id'] : null))
+            as String?;
+    if (sessionId == null) return;
+    final cache = _sessionCaches[connectionId]?[sessionId];
+    if (topic == 'permission.requested' && cache != null) {
+      cache.pendingPermission = value;
+      _showCachedSession(connectionId, sessionId, cache);
+      return;
+    }
+    if (topic == 'input.requested' && cache != null) {
+      cache.pendingInput = (value['input'] as Map?)?.cast<String, dynamic>();
+      _showCachedSession(connectionId, sessionId, cache);
+      return;
+    }
+    if (topic == 'turn.changed' || topic == 'session.status') {
+      markSessionDirty(sessionId, connectionId: connectionId);
+    }
   }
 
   Future<void> refresh() async {
     final c = client;
+    final connectionId = state.activeConnectionId;
     if (c == null ||
+        connectionId == null ||
         !(state.daemonStatuses[state.activeConnectionId] ?? false)) {
       return;
     }
@@ -202,9 +381,20 @@ class AppController extends Notifier<RizState> {
         connected: true,
         clearError: true,
       );
+      _cacheQuota(connectionId, value['quota']);
     } catch (e) {
       state = state.copyWith(error: e.toString());
     }
+  }
+
+  void _cacheQuota(String connectionId, dynamic quota) {
+    final data = state.daemonGlobals[connectionId] ?? const DaemonGlobalData();
+    _setDaemonGlobals(
+      connectionId,
+      quota is Map
+          ? data.copyWith(quota: quota.cast<String, dynamic>())
+          : data.copyWith(clearQuota: true),
+    );
   }
 
   Future<void> refreshOrReconnect() async {
@@ -357,6 +547,10 @@ class AppController extends Notifier<RizState> {
     await _clients.remove(id)?.close();
     await _secure.delete(key: 'riz.token.$id');
     await _secure.delete(key: 'riz.relayToken.$id');
+    _globalLoads.remove(id);
+    _sessionCaches.remove(id);
+    _sessionLoads.removeWhere((key, _) => key.startsWith('$id:'));
+    _sessionVersions.removeWhere((key, _) => key.startsWith('$id:'));
     final connections = state.connections.where((c) => c.id != id).toList();
     final active = connections.firstOrNull?.id;
     await _saveConnections(connections, active);
@@ -366,6 +560,7 @@ class AppController extends Notifier<RizState> {
       clearActiveConnection: active == null,
       connected: false,
       snapshot: const {},
+      daemonGlobals: {...state.daemonGlobals}..remove(id),
       clearProject: true,
       clearSession: true,
       clearDraftSession: true,
@@ -476,6 +671,9 @@ class AppController extends Notifier<RizState> {
 
   Future<void> deleteSession(String id) async {
     await request('session.delete', {'sessionId': id});
+    final connectionId = state.activeConnectionId;
+    if (connectionId != null) _sessionCaches[connectionId]?.remove(id);
+    if (connectionId != null) _sessionVersions.remove('$connectionId:$id');
     await refresh();
     if (state.selectedSessionId == id) await selectSession(null);
   }
@@ -535,34 +733,111 @@ class AppController extends Notifier<RizState> {
       );
       return;
     }
+    final connectionId = state.activeConnectionId;
+    if (connectionId == null) return;
+    final cache = _sessionCaches[connectionId]?[id];
     state = state.copyWith(
       selectedSessionId: id,
       clearDraftSession: true,
-      sessionLoading: true,
-      messages: const [],
-      clearPendingPermission: true,
-      clearPendingInput: true,
+      sessionLoading: cache == null,
+      messages: cache?.messages ?? const [],
+      pendingPermission: cache?.pendingPermission,
+      clearPendingPermission: cache?.pendingPermission == null,
+      pendingInput: cache?.pendingInput,
+      clearPendingInput: cache?.pendingInput == null,
     );
+    if (cache != null && !cache.dirty) return;
+    await _loadSession(connectionId, id);
+  }
+
+  Future<void> _loadSession(String connectionId, String sessionId) {
+    final key = '$connectionId:$sessionId';
+    final active = _sessionLoads[key];
+    if (active != null) return active;
+    late final Future<void> tracked;
+    tracked = _fetchSession(connectionId, sessionId).whenComplete(() {
+      if (identical(_sessionLoads[key], tracked)) {
+        _sessionLoads.remove(key);
+        final cache = _sessionCaches[connectionId]?[sessionId];
+        if (cache?.dirty == true &&
+            state.activeConnectionId == connectionId &&
+            state.selectedSessionId == sessionId) {
+          Future.microtask(() => _loadSession(connectionId, sessionId));
+        }
+      }
+    });
+    _sessionLoads[key] = tracked;
+    return tracked;
+  }
+
+  Future<void> _fetchSession(String connectionId, String id) async {
+    final daemon = _clients[connectionId];
+    final cacheKey = '$connectionId:$id';
+    final version = _sessionVersions[cacheKey] ?? 0;
     try {
-      final data = await request('session.get', {'id': id});
-      if (state.selectedSessionId != id) return;
-      state = state.copyWith(
-        sessionLoading: false,
+      final data = connectionId == state.activeConnectionId
+          ? await request('session.get', {'id': id})
+          : await (daemon ?? (throw StateError('Daemon is not connected')))
+                .request('session.get', {'id': id});
+      final cache = _SessionMemoryCache(
         messages: (data['messages'] as List? ?? const [])
             .cast<Map>()
             .map((e) => e.cast<String, dynamic>())
             .toList(),
         pendingPermission: (data['pendingPermission'] as Map?)
             ?.cast<String, dynamic>(),
-        clearPendingPermission: data['pendingPermission'] == null,
         pendingInput: (data['pendingInput'] as Map?)?.cast<String, dynamic>(),
-        clearPendingInput: data['pendingInput'] == null,
       );
+      cache.dirty = (_sessionVersions[cacheKey] ?? 0) != version;
+      (_sessionCaches[connectionId] ??= {})[id] = cache;
+      _showCachedSession(connectionId, id, cache);
     } catch (error) {
-      if (state.selectedSessionId == id) {
+      if (state.activeConnectionId == connectionId &&
+          state.selectedSessionId == id) {
         state = state.copyWith(sessionLoading: false, error: error.toString());
       }
     }
+  }
+
+  void markSessionDirty(String sessionId, {String? connectionId}) {
+    final daemonId = connectionId ?? state.activeConnectionId;
+    if (daemonId == null) return;
+    final key = '$daemonId:$sessionId';
+    _sessionVersions[key] = (_sessionVersions[key] ?? 0) + 1;
+    final cache = _sessionCaches[daemonId]?[sessionId];
+    if (cache == null) return;
+    cache.dirty = true;
+    if (daemonId != state.activeConnectionId ||
+        sessionId != state.selectedSessionId) {
+      return;
+    }
+    _sessionRefreshTimer?.cancel();
+    _sessionRefreshTimer = Timer(const Duration(milliseconds: 120), () {
+      if (state.activeConnectionId == daemonId &&
+          state.selectedSessionId == sessionId) {
+        unawaited(_loadSession(daemonId, sessionId));
+      }
+    });
+  }
+
+  void _showCachedSession(
+    String connectionId,
+    String sessionId,
+    _SessionMemoryCache cache,
+  ) {
+    if (state.activeConnectionId != connectionId ||
+        state.selectedSessionId != sessionId) {
+      return;
+    }
+    state = state.copyWith(
+      sessionLoading: false,
+      messages: cache.messages,
+      pendingPermission: cache.pendingPermission,
+      clearPendingPermission: cache.pendingPermission == null,
+      pendingInput: cache.pendingInput,
+      clearPendingInput: cache.pendingInput == null,
+      clearError: true,
+    );
   }
 
   Future<void> sendMessage(
@@ -619,6 +894,7 @@ class AppController extends Notifier<RizState> {
           'model': ?model,
         },
       });
+      markSessionDirty(id);
     } catch (_) {
       if (materializedSession != null) {
         try {
@@ -659,6 +935,12 @@ class AppController extends Notifier<RizState> {
       'sessionId': id,
       'allow': allow,
     });
+    final connectionId = state.activeConnectionId;
+    final cache = connectionId == null
+        ? null
+        : _sessionCaches[connectionId]?[id];
+    if (cache != null) cache.pendingPermission = null;
+    markSessionDirty(id);
     state = state.copyWith(clearPendingPermission: true);
     await refresh();
     await selectSession(id);
@@ -671,6 +953,12 @@ class AppController extends Notifier<RizState> {
       'sessionId': id,
       'selectedIndices': selectedIndices,
     });
+    final connectionId = state.activeConnectionId;
+    final cache = connectionId == null
+        ? null
+        : _sessionCaches[connectionId]?[id];
+    if (cache != null) cache.pendingInput = null;
+    markSessionDirty(id);
     state = state.copyWith(clearPendingInput: true);
     await refresh();
     await selectSession(id);

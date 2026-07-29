@@ -1,1 +1,1 @@
-const rizAppVersion = '1.0.0+11';
+const rizAppVersion = '1.0.0+12';

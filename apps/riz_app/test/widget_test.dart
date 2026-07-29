@@ -137,17 +137,50 @@ class _DelayedModelsController extends _DraftController {
   var modelRequests = 0;
 
   @override
+  Future<void> loadDaemonGlobals({
+    String? connectionId,
+    bool force = false,
+  }) async {
+    modelRequests++;
+    final response = await models.future;
+    state = state.copyWith(
+      daemonGlobals: {
+        'd1': DaemonGlobalData(
+          loaded: true,
+          models: (response['models'] as List)
+              .cast<Map>()
+              .map((model) => model.cast<String, dynamic>())
+              .toList(),
+        ),
+      },
+    );
+  }
+}
+
+class _SessionCacheController extends _ResponsiveController {
+  var sessionRequests = 0;
+
+  @override
   Future<Map<String, dynamic>> request(
     String method, [
     Map<String, dynamic> params = const {},
   ]) async {
-    if (method == 'provider.models') {
-      modelRequests++;
-      return models.future;
+    if (method != 'session.get') {
+      throw StateError('unexpected request: $method');
     }
-    if (method == 'provider.commands') return {'commands': <Object>[]};
-    if (method == 'skill.list') return {'skills': <Object>[]};
-    throw StateError('unexpected request: $method');
+    sessionRequests++;
+    return {
+      'messages': [
+        {
+          'id': 'cached-$sessionRequests',
+          'sessionId': params['id'],
+          'role': 'assistant',
+          'content': {'text': 'Cached response $sessionRequests'},
+        },
+      ],
+      'pendingPermission': null,
+      'pendingInput': null,
+    };
   }
 }
 
@@ -400,6 +433,40 @@ void main() {
 
     expect(find.text('Gemini Test'), findsOneWidget);
     expect(controller.modelRequests, 1);
+
+    await tester.tap(find.byType(CheckedPopupMenuItem<String>).last);
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('gemini-test'));
+    await tester.pumpAndSettle();
+    expect(find.byType(CheckedPopupMenuItem<String>), findsWidgets);
+    expect(controller.modelRequests, 1);
+  });
+
+  test('session history only refetches after its cache is dirty', () async {
+    final controller = _SessionCacheController();
+    final container = ProviderContainer(
+      overrides: [appControllerProvider.overrideWith(() => controller)],
+    );
+    addTearDown(container.dispose);
+    container.read(appControllerProvider);
+
+    await controller.selectSession('s1');
+    await controller.selectSession(null);
+    await controller.selectSession('s1');
+    expect(controller.sessionRequests, 1);
+    expect(
+      container.read(appControllerProvider).messages.single['id'],
+      'cached-1',
+    );
+
+    await controller.selectSession(null);
+    controller.markSessionDirty('s1', connectionId: 'd1');
+    await controller.selectSession('s1');
+    expect(controller.sessionRequests, 2);
+    expect(
+      container.read(appControllerProvider).messages.single['id'],
+      'cached-2',
+    );
   });
 
   testWidgets('first screen starts in a loading state', (tester) async {
@@ -529,7 +596,7 @@ void main() {
     );
     await tester.pump();
 
-    expect(find.text('Version 1.0.0+11'), findsOneWidget);
+    expect(find.text('Version 1.0.0+12'), findsOneWidget);
     expect(find.text('Current version: 0.1.0'), findsOneWidget);
     await tester.tap(find.widgetWithText(OutlinedButton, 'Check for updates'));
     await tester.pump();

@@ -65,6 +65,46 @@ class ConnectionLogEntry {
   }
 }
 
+class DaemonGlobalData {
+  const DaemonGlobalData({
+    this.loading = false,
+    this.loaded = false,
+    this.models = const [],
+    this.commands = const [],
+    this.globalSkills = const [],
+    this.quota,
+    this.error,
+  });
+
+  final bool loading;
+  final bool loaded;
+  final List<Map<String, dynamic>> models;
+  final List<Map<String, dynamic>> commands;
+  final List<Map<String, dynamic>> globalSkills;
+  final Map<String, dynamic>? quota;
+  final String? error;
+
+  DaemonGlobalData copyWith({
+    bool? loading,
+    bool? loaded,
+    List<Map<String, dynamic>>? models,
+    List<Map<String, dynamic>>? commands,
+    List<Map<String, dynamic>>? globalSkills,
+    Map<String, dynamic>? quota,
+    bool clearQuota = false,
+    String? error,
+    bool clearError = false,
+  }) => DaemonGlobalData(
+    loading: loading ?? this.loading,
+    loaded: loaded ?? this.loaded,
+    models: models ?? this.models,
+    commands: commands ?? this.commands,
+    globalSkills: globalSkills ?? this.globalSkills,
+    quota: clearQuota ? null : quota ?? this.quota,
+    error: clearError ? null : error ?? this.error,
+  );
+}
+
 class RizState {
   const RizState({
     this.loading = true,
@@ -83,6 +123,7 @@ class RizState {
     this.settings = const RizSettings(),
     this.navigationIndex = 0,
     this.daemonStatuses = const {},
+    this.daemonGlobals = const {},
     this.connectionLogs = const [],
   });
   final bool loading;
@@ -101,7 +142,11 @@ class RizState {
   final RizSettings settings;
   final int navigationIndex;
   final Map<String, bool> daemonStatuses;
+  final Map<String, DaemonGlobalData> daemonGlobals;
   final List<ConnectionLogEntry> connectionLogs;
+
+  DaemonGlobalData? get activeDaemonGlobals =>
+      activeConnectionId == null ? null : daemonGlobals[activeConnectionId];
 
   List<Map<String, dynamic>> get allProjects =>
       (snapshot['projects'] as List? ?? const [])
@@ -149,6 +194,7 @@ class RizState {
     RizSettings? settings,
     int? navigationIndex,
     Map<String, bool>? daemonStatuses,
+    Map<String, DaemonGlobalData>? daemonGlobals,
     List<ConnectionLogEntry>? connectionLogs,
   }) => RizState(
     loading: loading ?? this.loading,
@@ -175,6 +221,7 @@ class RizState {
     settings: settings ?? this.settings,
     navigationIndex: navigationIndex ?? this.navigationIndex,
     daemonStatuses: daemonStatuses ?? this.daemonStatuses,
+    daemonGlobals: daemonGlobals ?? this.daemonGlobals,
     connectionLogs: connectionLogs ?? this.connectionLogs,
   );
 }
