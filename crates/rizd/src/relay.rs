@@ -4,7 +4,10 @@ use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
 use futures_util::{SinkExt, StreamExt};
 use rand::RngCore;
 use serde::Serialize;
-use std::{path::Path, time::Duration};
+use std::{
+    path::Path,
+    time::{Duration, Instant},
+};
 use tokio_tungstenite::{
     connect_async,
     tungstenite::{client::IntoClientRequest, http::HeaderValue},
@@ -13,8 +16,12 @@ use url::Url;
 
 const RELAY_PROTOCOL_PREFIX: &str = "riz-relay-v1.";
 const CLIENT_PAIRED_MARKER: &str = "riz-relay:client-paired:v1";
+const DAEMON_HEARTBEAT: &str = "riz-relay:daemon-heartbeat:v1";
+const DAEMON_HEARTBEAT_ACK: &str = "riz-relay:daemon-heartbeat-ack:v1";
 const RELAY_CHANNELS: usize = 4;
 const CLIENT_FIRST_FRAME_TIMEOUT: Duration = Duration::from_secs(10);
+const DAEMON_HEARTBEAT_INTERVAL: Duration = Duration::from_secs(30);
+const DAEMON_HEARTBEAT_TIMEOUT: Duration = Duration::from_secs(10);
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -63,14 +70,19 @@ pub async fn run(config: Config) {
 async fn run_channel(listen: String, relay: RelayConfig, slot: usize) {
     let mut delay = Duration::from_secs(1);
     loop {
+        let started = Instant::now();
         match bridge_once(&listen, &relay).await {
             Ok(()) => tracing::warn!(slot, "relay channel closed"),
             Err(error) => {
                 tracing::warn!(slot, error = %format!("{error:#}"), "relay channel failed")
             }
         }
+        if started.elapsed() >= DAEMON_HEARTBEAT_INTERVAL {
+            delay = Duration::from_secs(1);
+        } else {
+            delay = (delay * 2).min(Duration::from_secs(30));
+        }
         tokio::time::sleep(delay).await;
-        delay = (delay * 2).min(Duration::from_secs(30));
     }
 }
 
@@ -96,14 +108,38 @@ async fn bridge_once(listen: &str, relay: &RelayConfig) -> Result<()> {
     }
 
     let (mut remote_write, mut remote_read) = remote.split();
+    let mut heartbeat_deadline = tokio::time::Instant::now() + DAEMON_HEARTBEAT_INTERVAL;
+    let mut awaiting_heartbeat_ack = false;
     let first = loop {
-        match remote_read.next().await.context("relay channel closed")?? {
+        let message = match tokio::time::timeout_at(heartbeat_deadline, remote_read.next()).await {
+            Ok(message) => message.context("relay channel closed")??,
+            Err(_) if awaiting_heartbeat_ack => {
+                bail!("relay daemon heartbeat was not acknowledged within 10 seconds")
+            }
+            Err(_) => {
+                remote_write
+                    .send(tokio_tungstenite::tungstenite::Message::Text(
+                        DAEMON_HEARTBEAT.into(),
+                    ))
+                    .await?;
+                awaiting_heartbeat_ack = true;
+                heartbeat_deadline = tokio::time::Instant::now() + DAEMON_HEARTBEAT_TIMEOUT;
+                continue;
+            }
+        };
+        match message {
             tokio_tungstenite::tungstenite::Message::Ping(value) => {
                 remote_write
                     .send(tokio_tungstenite::tungstenite::Message::Pong(value))
                     .await?;
             }
             tokio_tungstenite::tungstenite::Message::Close(_) => return Ok(()),
+            tokio_tungstenite::tungstenite::Message::Text(value)
+                if value == DAEMON_HEARTBEAT_ACK =>
+            {
+                awaiting_heartbeat_ack = false;
+                heartbeat_deadline = tokio::time::Instant::now() + DAEMON_HEARTBEAT_INTERVAL;
+            }
             tokio_tungstenite::tungstenite::Message::Text(value)
                 if value == CLIENT_PAIRED_MARKER =>
             {
@@ -118,6 +154,8 @@ async fn bridge_once(listen: &str, relay: &RelayConfig) -> Result<()> {
                             tokio_tungstenite::tungstenite::Message::Close(_) => {
                                 return Ok::<_, anyhow::Error>(None);
                             }
+                            tokio_tungstenite::tungstenite::Message::Text(value)
+                                if value == DAEMON_HEARTBEAT_ACK => {}
                             message => return Ok::<_, anyhow::Error>(Some(message)),
                         }
                     }

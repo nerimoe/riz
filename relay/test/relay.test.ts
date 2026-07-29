@@ -1,9 +1,15 @@
-import { env } from "cloudflare:test";
+import {
+  env,
+  runDurableObjectAlarm,
+  runInDurableObject,
+} from "cloudflare:test";
 import { describe, expect, it } from "vitest";
 import { parseRelayRoute, parseRelayToken } from "../src/protocol";
 
 const token = "A".repeat(43);
 const pairedMarker = "riz-relay:client-paired:v1";
+const daemonHeartbeat = "riz-relay:daemon-heartbeat:v1";
+const daemonHeartbeatAck = "riz-relay:daemon-heartbeat-ack:v1";
 
 function upgrade(role: "daemon" | "client", candidate = token): Request {
   return new Request("https://relay.test/", {
@@ -99,6 +105,20 @@ describe("RelayRoom", () => {
     client.close(1000, "done");
   });
 
+  it("acknowledges idle daemon heartbeats without consuming a client slot", async () => {
+    const roomName = crypto.randomUUID();
+    const daemon = await connect(roomName, "daemon");
+    const acknowledged = nextMessage(daemon);
+    daemon.send(daemonHeartbeat);
+    expect((await acknowledged).data).toBe(daemonHeartbeatAck);
+
+    const paired = nextMessage(daemon);
+    const client = await connect(roomName, "client");
+    expect((await paired).data).toBe(pairedMarker);
+    daemon.close(1000, "done");
+    client.close(1000, "done");
+  });
+
   it("keeps simultaneous client channels isolated", async () => {
     const roomName = crypto.randomUUID();
     const daemonA = await connect(roomName, "daemon");
@@ -121,5 +141,61 @@ describe("RelayRoom", () => {
     daemonB.close(1000, "done");
     clientA.close(1000, "done");
     clientB.close(1000, "done");
+  });
+
+  it("reclaims clients that never send their authentication frame", async () => {
+    const roomName = crypto.randomUUID();
+    const room = env.RELAY_ROOMS.getByName(roomName);
+    const daemon = await connect(roomName, "daemon");
+    const paired = nextMessage(daemon);
+    const client = await connect(roomName, "client");
+    expect((await paired).data).toBe(pairedMarker);
+
+    await runInDurableObject(room, (_instance, state) => {
+      const socket = state.getWebSockets("client")[0];
+      const attachment = socket.deserializeAttachment() as Record<
+        string,
+        unknown
+      >;
+      socket.serializeAttachment({ ...attachment, connectedAt: 0 });
+    });
+
+    const clientClosed = new Promise<CloseEvent>((resolve) =>
+      client.addEventListener("close", resolve, { once: true }),
+    );
+    const daemonClosed = new Promise<CloseEvent>((resolve) =>
+      daemon.addEventListener("close", resolve, { once: true }),
+    );
+    expect(await runDurableObjectAlarm(room)).toBe(true);
+    expect((await clientClosed).code).toBe(1008);
+    expect((await daemonClosed).code).toBe(1012);
+  });
+
+  it("reclaims daemon sockets whose client peer no longer exists", async () => {
+    const roomName = crypto.randomUUID();
+    const room = env.RELAY_ROOMS.getByName(roomName);
+    const daemon = await connect(roomName, "daemon");
+    await runInDurableObject(room, (_instance, state) => {
+      const socket = state.getWebSockets("daemon")[0];
+      const attachment = socket.deserializeAttachment() as Record<
+        string,
+        unknown
+      >;
+      socket.serializeAttachment({ ...attachment, peerId: "missing-client" });
+    });
+
+    const daemonClosed = new Promise<CloseEvent>((resolve) =>
+      daemon.addEventListener("close", resolve, { once: true }),
+    );
+    const unavailable = await room.fetch(upgrade("client"));
+    expect(unavailable.status).toBe(503);
+    expect((await daemonClosed).code).toBe(1012);
+
+    const replacement = await connect(roomName, "daemon");
+    const paired = nextMessage(replacement);
+    const client = await connect(roomName, "client");
+    expect((await paired).data).toBe(pairedMarker);
+    replacement.close(1000, "done");
+    client.close(1000, "done");
   });
 });

@@ -8,11 +8,16 @@ import {
 
 const MAX_FRAME_BYTES = 26 * 1024 * 1024;
 const CLIENT_PAIRED_MARKER = "riz-relay:client-paired:v1";
+const DAEMON_HEARTBEAT = "riz-relay:daemon-heartbeat:v1";
+const DAEMON_HEARTBEAT_ACK = "riz-relay:daemon-heartbeat-ack:v1";
+const CLIENT_FIRST_FRAME_TIMEOUT_MS = 10_000;
 
 interface SocketAttachment {
   role: RelayRole;
   id: string;
   peerId: string | null;
+  connectedAt?: number;
+  hasSentFrame?: boolean;
 }
 
 function text(message: string, status: number): Response {
@@ -77,6 +82,8 @@ export class RelayRoom extends DurableObject<Env> {
 
     let peer: WebSocket | undefined;
     if (role === "client") {
+      this.reclaimStalledClients(Date.now());
+      this.reclaimOrphanedDaemons();
       peer = this.ctx
         .getWebSockets("daemon")
         .find((socket) => this.attachment(socket).peerId === null);
@@ -90,6 +97,8 @@ export class RelayRoom extends DurableObject<Env> {
       role,
       id,
       peerId: peer === undefined ? null : this.attachment(peer).id,
+      connectedAt: Date.now(),
+      hasSentFrame: role === "daemon",
     } satisfies SocketAttachment);
     if (peer !== undefined) {
       const peerAttachment = this.attachment(peer);
@@ -97,9 +106,19 @@ export class RelayRoom extends DurableObject<Env> {
         ...peerAttachment,
         peerId: id,
       } satisfies SocketAttachment);
-      peer.send(CLIENT_PAIRED_MARKER);
+      try {
+        peer.send(CLIENT_PAIRED_MARKER);
+      } catch {
+        peer.close(1011, "relay daemon is unavailable");
+        return text("daemon is offline or busy", 503);
+      }
     }
     this.ctx.acceptWebSocket(server, [role]);
+    if (role === "client") {
+      await this.ctx.storage.setAlarm(
+        Date.now() + CLIENT_FIRST_FRAME_TIMEOUT_MS,
+      );
+    }
     return new Response(null, {
       status: 101,
       webSocket: client,
@@ -119,7 +138,15 @@ export class RelayRoom extends DurableObject<Env> {
       return;
     }
 
-    const attachment = this.attachment(socket);
+    let attachment = this.attachment(socket);
+    if (attachment.role === "daemon" && message === DAEMON_HEARTBEAT) {
+      socket.send(DAEMON_HEARTBEAT_ACK);
+      return;
+    }
+    if (attachment.role === "client" && attachment.hasSentFrame !== true) {
+      attachment = { ...attachment, hasSentFrame: true };
+      socket.serializeAttachment(attachment);
+    }
     const target = this.findSocket(attachment.peerId);
     if (target === undefined) {
       socket.close(1012, "relay peer disconnected");
@@ -157,6 +184,13 @@ export class RelayRoom extends DurableObject<Env> {
     socket.close(1011, "relay socket error");
   }
 
+  async alarm(): Promise<void> {
+    const nextDeadline = this.reclaimStalledClients(Date.now());
+    if (nextDeadline !== null) {
+      await this.ctx.storage.setAlarm(nextDeadline);
+    }
+  }
+
   private attachment(socket: WebSocket): SocketAttachment {
     return socket.deserializeAttachment() as SocketAttachment;
   }
@@ -166,5 +200,40 @@ export class RelayRoom extends DurableObject<Env> {
     return this.ctx
       .getWebSockets()
       .find((socket) => this.attachment(socket).id === id);
+  }
+
+  private reclaimStalledClients(now: number): number | null {
+    let nextDeadline: number | null = null;
+    for (const socket of this.ctx.getWebSockets("client")) {
+      const attachment = this.attachment(socket);
+      if (attachment.hasSentFrame === true) continue;
+      const deadline =
+        attachment.connectedAt === undefined
+          ? 0
+          : attachment.connectedAt + CLIENT_FIRST_FRAME_TIMEOUT_MS;
+      if (deadline > now) {
+        nextDeadline =
+          nextDeadline === null ? deadline : Math.min(nextDeadline, deadline);
+        continue;
+      }
+      const peer = this.findSocket(attachment.peerId);
+      if (peer !== undefined) {
+        peer.close(1012, "relay client did not send its first frame");
+      }
+      socket.close(1008, "authentication frame timeout");
+    }
+    return nextDeadline;
+  }
+
+  private reclaimOrphanedDaemons(): void {
+    for (const socket of this.ctx.getWebSockets("daemon")) {
+      const attachment = this.attachment(socket);
+      if (
+        attachment.peerId !== null &&
+        this.findSocket(attachment.peerId) === undefined
+      ) {
+        socket.close(1012, "orphaned relay peer");
+      }
+    }
   }
 }
