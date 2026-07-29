@@ -378,6 +378,12 @@ async fn dispatch(state: &AppState, request: &Envelope) -> Result<Value> {
             state.agy.cancel(id).await?;
             Ok(json!({"cancelled":true}))
         }
+        "session.task.stop" => {
+            let session_id = str_param(p, "sessionId")?;
+            let task_id = str_param(p, "taskId")?;
+            state.agy.stop_task(session_id, task_id)?;
+            Ok(json!({"stopped":true,"taskId":task_id}))
+        }
         "session.permission.respond" => {
             let id = str_param(p, "sessionId")?;
             let allow = p["allow"].as_bool().context("missing allow")?;

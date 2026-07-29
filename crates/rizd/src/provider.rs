@@ -1,5 +1,10 @@
 use anyhow::{Context, Result, bail};
 use async_trait::async_trait;
+#[cfg(unix)]
+use nix::{
+    sys::signal::{Signal, killpg},
+    unistd::Pid,
+};
 use portable_pty::{ChildKiller, CommandBuilder, NativePtySystem, PtySize, PtySystem};
 use riz_protocol::ProviderCapabilities;
 use rusqlite::Connection;
@@ -71,8 +76,10 @@ pub struct AgyProvider {
 struct RunningAgent {
     killer: Box<dyn ChildKiller + Send + Sync>,
     writer: Box<dyn Write + Send>,
+    process_id: Option<u32>,
     pending_permission: Option<Value>,
     pending_input: Option<Value>,
+    stopped_tasks: HashSet<String>,
     deny_steps: usize,
     permission_denied: bool,
 }
@@ -120,6 +127,35 @@ impl AgyProvider {
     pub fn pending_input(&self, session_id: &str) -> Option<Value> {
         let agent = self.running.lock().ok()?.get(session_id)?.clone();
         agent.lock().ok()?.pending_input.clone()
+    }
+
+    pub fn stop_task(&self, session_id: &str, task_id: &str) -> Result<()> {
+        let agent = self
+            .running
+            .lock()
+            .unwrap()
+            .get(session_id)
+            .cloned()
+            .context("no active agent for session")?;
+        let root_pid = agent
+            .lock()
+            .unwrap()
+            .process_id
+            .context("agy process id is unavailable")?;
+        let conversation_id = task_id
+            .split_once("/task-")
+            .map(|(id, _)| id)
+            .context("invalid agy task id")?;
+        let conversation = conversation_file(conversation_id).context("conversation not found")?;
+        let description = background_task_description(&conversation, task_id)?
+            .context("background task description not found")?;
+        terminate_task_process(root_pid, &description)?;
+        agent
+            .lock()
+            .unwrap()
+            .stopped_tasks
+            .insert(task_id.to_owned());
+        Ok(())
     }
 
     pub fn respond_input(&self, session_id: &str, selected_indices: &[usize]) -> Result<()> {
@@ -341,13 +377,16 @@ impl AgentProvider for AgyProvider {
             cmd.arg(prompt);
             cmd.cwd(&request.cwd);
             let mut child = pair.slave.spawn_command(cmd)?;
+            let process_id = child.process_id();
             drop(pair.slave);
             let writer = pair.master.take_writer()?;
             let agent = Arc::new(Mutex::new(RunningAgent {
                 killer: child.clone_killer(),
                 writer,
+                process_id,
                 pending_permission: None,
                 pending_input: None,
+                stopped_tasks: HashSet::new(),
                 deny_steps: 1,
                 permission_denied: false,
             }));
@@ -376,9 +415,15 @@ impl AgentProvider for AgyProvider {
                         });
                     if let Some(path) = conversation_path {
                         if let Ok(events) = read_structured_events(&path) {
-                            for event in events.into_iter().filter(|event| {
+                            for mut event in events.into_iter().filter(|event| {
                                 event["index"].as_i64().unwrap_or(-1) > baseline_step
                             }) {
+                                if let Ok(running_agent) = monitor_agent.lock() {
+                                    apply_stopped_task_status(
+                                        &mut event,
+                                        &running_agent.stopped_tasks,
+                                    );
+                                }
                                 if event["type"] == "text" {
                                     let text = event["text"].as_str().unwrap_or_default();
                                     if !text.is_empty() && text != emitted_text {
@@ -402,14 +447,22 @@ impl AgentProvider for AgyProvider {
                                 }
                             }
                         }
+                        let has_stopped_tasks = monitor_agent
+                            .lock()
+                            .map(|agent| !agent.stopped_tasks.is_empty())
+                            .unwrap_or(false);
                         if let Ok(Some(progress)) =
                             conversation_turn_progress(&path, &completion_prompt, baseline_step)
-                            && completion_tracker.should_complete(progress)
+                            && completion_tracker.should_complete(progress, has_stopped_tasks)
                         {
                             monitor_completion_confirmed.store(true, Ordering::Relaxed);
                             if let Ok(mut running_agent) = monitor_agent.lock() {
-                                let _ = running_agent.writer.write_all(b"\x03\x03");
-                                let _ = running_agent.writer.flush();
+                                if has_stopped_tasks {
+                                    let _ = running_agent.killer.kill();
+                                } else {
+                                    let _ = running_agent.writer.write_all(b"\x03\x03");
+                                    let _ = running_agent.writer.flush();
+                                }
                             }
                             break;
                         }
@@ -462,9 +515,15 @@ impl AgentProvider for AgyProvider {
             let status = child.wait()?;
             monitor_stop.store(true, Ordering::Relaxed);
             let _ = completion_monitor.join();
-            let permission_denied = agent.lock().unwrap().permission_denied;
+            let (permission_denied, stopped_tasks) = {
+                let running_agent = agent.lock().unwrap();
+                (
+                    running_agent.permission_denied,
+                    running_agent.stopped_tasks.clone(),
+                )
+            };
             running.lock().unwrap().remove(&session_id);
-            if !status.success() {
+            if !status.success() && !completion_confirmed.load(Ordering::Relaxed) {
                 bail!(
                     "agy exited with status {status:?}: {}",
                     strip_ansi(&String::from_utf8_lossy(&bytes))
@@ -479,6 +538,7 @@ impl AgentProvider for AgyProvider {
             Ok::<_, anyhow::Error>((
                 strip_ansi(&String::from_utf8_lossy(&bytes)),
                 permission_denied,
+                stopped_tasks,
             ))
         })
         .await??;
@@ -488,7 +548,7 @@ impl AgentProvider for AgyProvider {
                 .filter(|a| Some(a) != before.as_ref())
                 .map(|p| p.file_stem().unwrap().to_string_lossy().into_owned())
         });
-        let events = conversation_id
+        let mut events = conversation_id
             .as_deref()
             .and_then(conversation_file)
             .and_then(|path| read_structured_events(&path).ok())
@@ -496,6 +556,9 @@ impl AgentProvider for AgyProvider {
             .into_iter()
             .filter(|event| event["index"].as_i64().unwrap_or(-1) > baseline_step)
             .collect::<Vec<_>>();
+        for event in &mut events {
+            apply_stopped_task_status(event, &result.2);
+        }
         let text = events
             .iter()
             .rev()
@@ -813,13 +876,19 @@ fn read_transcript_events(conversation_path: &Path) -> Result<Vec<Value>> {
                 "text": content,
             })),
             (Some("MODEL"), Some(kind)) if !kind.ends_with("RESPONSE") => {
-                events.push(json!({
+                let mut event = json!({
                     "index": index,
                     "type": "tool_result",
                     "status": status,
                     "name": kind.to_ascii_lowercase(),
                     "text": content,
-                }));
+                });
+                if let Some(task) =
+                    background_task_details(conversation_path, original_content, status)
+                {
+                    event["task"] = task;
+                }
+                events.push(event);
             }
             _ => {}
         }
@@ -1091,6 +1160,7 @@ fn conversation_max_step(path: &Path) -> Result<i64> {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct ConversationTurnProgress {
     final_response_step: Option<i64>,
+    latest_planner_step: Option<i64>,
     has_active_work: bool,
 }
 
@@ -1105,6 +1175,133 @@ fn background_task_id(content: &str) -> Option<String> {
         .ok()?
         .find(content)
         .map(|matched| matched.as_str().to_owned())
+}
+
+fn background_task_details(conversation_path: &Path, content: &str, status: &str) -> Option<Value> {
+    let task_id = background_task_id(content)?;
+    let description = content
+        .lines()
+        .find_map(|line| line.strip_prefix("Task Description: "))
+        .unwrap_or_default();
+    let started_at = content
+        .lines()
+        .find_map(|line| line.strip_prefix("Created At: "));
+    let log_uri = content
+        .lines()
+        .find_map(|line| line.strip_prefix("Task logs are available at: "));
+    let log_path = log_uri
+        .and_then(|uri| Url::parse(uri).ok())
+        .and_then(|uri| uri.to_file_path().ok())
+        .or_else(|| {
+            let name = task_id.rsplit('/').next()?;
+            transcript_path(conversation_path)
+                .ok()?
+                .parent()?
+                .parent()?
+                .join("tasks")
+                .join(format!("{name}.log"))
+                .into()
+        });
+    let log_tail = log_path.as_deref().and_then(read_task_log_tail);
+    Some(json!({
+        "id": task_id,
+        "description": description,
+        "startedAt": started_at,
+        "status": status,
+        "logPath": log_path,
+        "logTail": log_tail,
+        "supportsInput": false,
+    }))
+}
+
+fn read_task_log_tail(path: &Path) -> Option<String> {
+    const MAX_TASK_LOG_BYTES: usize = 32 * 1024;
+    let bytes = fs::read(path).ok()?;
+    let start = bytes.len().saturating_sub(MAX_TASK_LOG_BYTES);
+    Some(String::from_utf8_lossy(&bytes[start..]).into_owned())
+}
+
+fn apply_stopped_task_status(event: &mut Value, stopped_tasks: &HashSet<String>) {
+    let Some(task_id) = event["task"]["id"].as_str() else {
+        return;
+    };
+    if stopped_tasks.contains(task_id) {
+        event["status"] = json!("CANCELLED");
+        event["task"]["status"] = json!("CANCELLED");
+    }
+}
+
+fn background_task_description(conversation_path: &Path, task_id: &str) -> Result<Option<String>> {
+    let contents = fs::read_to_string(transcript_path(conversation_path)?)?;
+    Ok(contents
+        .lines()
+        .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+        .filter_map(|row| row["content"].as_str().map(str::to_owned))
+        .find(|content| background_task_id(content).as_deref() == Some(task_id))
+        .and_then(|content| {
+            content
+                .lines()
+                .find_map(|line| line.strip_prefix("Task Description: "))
+                .map(str::to_owned)
+        }))
+}
+
+fn terminate_task_process(root_pid: u32, description: &str) -> Result<()> {
+    #[cfg(unix)]
+    {
+        let output = Command::new("ps")
+            .args(["-axo", "pid=,ppid=,pgid=,stat=,command=", "-ww"])
+            .output()
+            .context("inspect agy task processes")?;
+        let rows = String::from_utf8_lossy(&output.stdout)
+            .lines()
+            .filter_map(|line| {
+                let mut fields = line.split_whitespace();
+                let pid = fields.next()?.parse::<u32>().ok()?;
+                let parent = fields.next()?.parse::<u32>().ok()?;
+                let pgid = fields.next()?.parse::<i32>().ok()?;
+                let status = fields.next()?.to_owned();
+                let command = fields.collect::<Vec<_>>().join(" ");
+                Some((pid, parent, pgid, status, command))
+            })
+            .collect::<Vec<_>>();
+        let mut descendants = HashSet::from([root_pid]);
+        loop {
+            let before = descendants.len();
+            for (pid, parent, _, _, _) in &rows {
+                if descendants.contains(parent) {
+                    descendants.insert(*pid);
+                }
+            }
+            if descendants.len() == before {
+                break;
+            }
+        }
+        let groups = rows
+            .iter()
+            .filter(|(pid, _, pgid, _, command)| {
+                *pid != root_pid
+                    && *pgid > 0
+                    && descendants.contains(pid)
+                    && command.contains(description)
+            })
+            .map(|(_, _, pgid, _, _)| *pgid)
+            .collect::<HashSet<_>>();
+        if groups.is_empty() {
+            bail!("agy task process is no longer running")
+        }
+        for pgid in groups {
+            let group = Pid::from_raw(pgid);
+            killpg(group, Signal::SIGTERM)?;
+            let _ = killpg(group, Signal::SIGCONT);
+        }
+        Ok(())
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = (root_pid, description);
+        bail!("stopping agy background tasks is unsupported on this platform")
+    }
 }
 
 fn background_task_completions(rows: &[Value]) -> HashMap<String, BackgroundTaskCompletion> {
@@ -1136,9 +1333,13 @@ struct TurnCompletionTracker {
 }
 
 impl TurnCompletionTracker {
-    fn should_complete(&mut self, progress: ConversationTurnProgress) -> bool {
+    fn should_complete(
+        &mut self,
+        progress: ConversationTurnProgress,
+        allow_empty_terminal_response: bool,
+    ) -> bool {
         if progress.has_active_work {
-            if let Some(step) = progress.final_response_step {
+            if let Some(step) = progress.latest_planner_step {
                 self.planner_seen_while_working = Some(
                     self.planner_seen_while_working
                         .map_or(step, |current| current.max(step)),
@@ -1146,7 +1347,12 @@ impl TurnCompletionTracker {
             }
             return false;
         }
-        progress.final_response_step.is_some_and(|step| {
+        let terminal_step = if allow_empty_terminal_response {
+            progress.latest_planner_step
+        } else {
+            progress.final_response_step
+        };
+        terminal_step.is_some_and(|step| {
             self.planner_seen_while_working
                 .is_none_or(|floor| step > floor)
         })
@@ -1196,6 +1402,13 @@ fn conversation_turn_progress(
         })
         .map(|(step, _)| *step)
         .max();
+    let latest_planner_step = latest_steps
+        .iter()
+        .filter(|(_, row)| {
+            row["source"] == "MODEL" && row["type"] == "PLANNER_RESPONSE" && row["status"] == "DONE"
+        })
+        .map(|(step, _)| *step)
+        .max();
     let task_completions = background_task_completions(&rows);
     let has_active_work = latest_steps.values().any(|row| {
         row["source"] == "MODEL"
@@ -1208,6 +1421,7 @@ fn conversation_turn_progress(
     });
     Ok(Some(ConversationTurnProgress {
         final_response_step,
+        latest_planner_step,
         has_active_work,
     }))
 }
@@ -1490,6 +1704,7 @@ Quota available
             conversation_turn_progress(&conversation, "new prompt", 4).unwrap(),
             Some(ConversationTurnProgress {
                 final_response_step: Some(6),
+                latest_planner_step: Some(6),
                 has_active_work: false,
             })
         );
@@ -1523,7 +1738,7 @@ Quota available
             .unwrap()
             .unwrap();
         assert!(running.has_active_work);
-        assert!(!tracker.should_complete(running));
+        assert!(!tracker.should_complete(running, false));
 
         fs::write(
             &transcript,
@@ -1539,7 +1754,7 @@ Quota available
             .unwrap()
             .unwrap();
         assert!(!old_response.has_active_work);
-        assert!(!tracker.should_complete(old_response));
+        assert!(!tracker.should_complete(old_response, false));
 
         fs::write(
             &transcript,
@@ -1555,7 +1770,7 @@ Quota available
         let final_response = conversation_turn_progress(&conversation, "clone repositories", 4)
             .unwrap()
             .unwrap();
-        assert!(tracker.should_complete(final_response));
+        assert!(tracker.should_complete(final_response, false));
         let events = read_structured_events(&conversation).unwrap();
         let task = events
             .iter()
@@ -1568,6 +1783,117 @@ Quota available
                 .unwrap()
                 .contains("exited with code 0")
         );
+    }
+
+    #[test]
+    fn manually_stopped_task_accepts_agys_empty_terminal_response() {
+        let mut tracker = TurnCompletionTracker::default();
+        assert!(!tracker.should_complete(
+            ConversationTurnProgress {
+                final_response_step: Some(5),
+                latest_planner_step: Some(5),
+                has_active_work: true,
+            },
+            false,
+        ));
+        assert!(tracker.should_complete(
+            ConversationTurnProgress {
+                final_response_step: Some(5),
+                latest_planner_step: Some(7),
+                has_active_work: false,
+            },
+            true,
+        ));
+    }
+
+    #[test]
+    fn background_task_event_includes_live_log_details() {
+        let temp = tempfile::tempdir().unwrap();
+        let provider_root = temp.path().join("antigravity-cli");
+        let conversation = provider_root.join("conversations/test.db");
+        let system_root = provider_root.join("brain/test/.system_generated");
+        let transcript = system_root.join("logs/transcript.jsonl");
+        let task_log = system_root.join("tasks/task-3.log");
+        fs::create_dir_all(conversation.parent().unwrap()).unwrap();
+        fs::create_dir_all(transcript.parent().unwrap()).unwrap();
+        fs::create_dir_all(task_log.parent().unwrap()).unwrap();
+        fs::write(&conversation, []).unwrap();
+        fs::write(&task_log, "cloning one\ncloning two\n").unwrap();
+        fs::write(
+            &transcript,
+            "{\"step_index\":3,\"source\":\"MODEL\",\"type\":\"RUN_COMMAND\",\"status\":\"RUNNING\",\"content\":\"Tool is running with task id: 00000000-0000-0000-0000-000000000003/task-3\\nTask Description: git clone repositories\\nCreated At: 2026-07-30T00:00:00Z\"}\n",
+        )
+        .unwrap();
+
+        let events = read_structured_events(&conversation).unwrap();
+        let task = &events[0]["task"];
+        assert_eq!(task["id"], "00000000-0000-0000-0000-000000000003/task-3");
+        assert_eq!(task["description"], "git clone repositories");
+        assert_eq!(task["status"], "RUNNING");
+        assert_eq!(task["logTail"], "cloning one\ncloning two\n");
+        assert_eq!(task["supportsInput"], false);
+
+        fs::write(&task_log, "cloning one\ncloning two\ndone\n").unwrap();
+        let updated = read_structured_events(&conversation).unwrap();
+        assert_eq!(
+            updated[0]["task"]["logTail"],
+            "cloning one\ncloning two\ndone\n"
+        );
+        let mut stopped = updated[0].clone();
+        apply_stopped_task_status(
+            &mut stopped,
+            &HashSet::from(["00000000-0000-0000-0000-000000000003/task-3".to_owned()]),
+        );
+        assert_eq!(stopped["status"], "CANCELLED");
+        assert_eq!(stopped["task"]["status"], "CANCELLED");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn stopping_task_terminates_only_the_matching_background_process_group() {
+        let pair = NativePtySystem::default()
+            .openpty(PtySize {
+                rows: 24,
+                cols: 80,
+                pixel_width: 0,
+                pixel_height: 0,
+            })
+            .unwrap();
+        let mut command = CommandBuilder::new("/bin/sh");
+        command.args(["-c", "set -m; sleep 60 & while :; do sleep 1; done"]);
+        let mut child = pair.slave.spawn_command(command).unwrap();
+        let root_pid = child.process_id().unwrap();
+        std::thread::sleep(Duration::from_millis(150));
+
+        let task_pid = Command::new("pgrep")
+            .args(["-P", &root_pid.to_string(), "-f", "sleep 60"])
+            .output()
+            .unwrap();
+        let task_pid = String::from_utf8_lossy(&task_pid.stdout)
+            .lines()
+            .next()
+            .unwrap()
+            .parse::<i32>()
+            .unwrap();
+
+        terminate_task_process(root_pid, "sleep 60").unwrap();
+
+        let deadline = std::time::Instant::now() + Duration::from_secs(3);
+        let stopped = loop {
+            if nix::sys::signal::kill(Pid::from_raw(task_pid), None).is_err() {
+                break true;
+            }
+            if std::time::Instant::now() >= deadline {
+                break false;
+            }
+            std::thread::sleep(Duration::from_millis(25));
+        };
+        assert!(
+            nix::sys::signal::kill(Pid::from_raw(root_pid as i32), None).is_ok(),
+            "agy root process was terminated with the background task"
+        );
+        child.kill().unwrap();
+        assert!(stopped, "background task did not stop");
     }
 
     #[test]

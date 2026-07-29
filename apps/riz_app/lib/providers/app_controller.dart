@@ -928,6 +928,13 @@ class AppController extends Notifier<RizState> {
     if (id != null) await request('session.cancel', {'sessionId': id});
   }
 
+  Future<void> stopTask(String sessionId, String taskId) async {
+    await request('session.task.stop', {
+      'sessionId': sessionId,
+      'taskId': taskId,
+    });
+  }
+
   Future<void> respondPermission(bool allow) async {
     final id = state.selectedSessionId;
     if (id == null) return;

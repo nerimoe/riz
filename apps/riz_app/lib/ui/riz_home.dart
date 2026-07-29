@@ -2607,7 +2607,11 @@ class _MessageView extends ConsumerWidget {
                 _RemoteImageAttachment(
                   attachment: attachment.cast<String, dynamic>(),
                 ),
-            if (structured.isNotEmpty) _AgentActivityView(events: structured),
+            if (structured.isNotEmpty)
+              _AgentActivityView(
+                events: structured,
+                sessionId: message['sessionId']?.toString() ?? '',
+              ),
             MarkdownBody(data: text, selectable: true),
             if (content['diagnostic'] != null)
               ExpansionTile(
@@ -2767,12 +2771,19 @@ class _RemoteImageAttachmentState
 }
 
 class _AgentActivityView extends StatelessWidget {
-  const _AgentActivityView({required this.events});
+  const _AgentActivityView({required this.events, required this.sessionId});
 
   final List<Map<String, dynamic>> events;
+  final String sessionId;
 
   @override
   Widget build(BuildContext context) {
+    final hasRunningTask = events.any((event) {
+      final task = event['task'];
+      return task is Map &&
+          (task['status'] ?? event['status'])?.toString().toUpperCase() ==
+              'RUNNING';
+    });
     final completed = events
         .where((event) => _eventComplete(event['status']))
         .length;
@@ -2783,9 +2794,11 @@ class _AgentActivityView extends StatelessWidget {
         borderRadius: BorderRadius.circular(6),
       ),
       child: ExpansionTile(
+        key: ValueKey(hasRunningTask),
         dense: true,
         visualDensity: VisualDensity.compact,
         minTileHeight: 38,
+        initiallyExpanded: hasRunningTask,
         tilePadding: const EdgeInsets.symmetric(horizontal: 10),
         childrenPadding: const EdgeInsets.only(bottom: 4),
         leading: const Icon(Icons.bolt_outlined, size: 18),
@@ -2800,7 +2813,8 @@ class _AgentActivityView extends StatelessWidget {
                 style: context.text.labelSmall,
               ),
         children: [
-          for (final event in events) _StructuredEventView(event: event),
+          for (final event in events)
+            _StructuredEventView(event: event, sessionId: sessionId),
         ],
       ),
     );
@@ -2819,10 +2833,19 @@ bool _eventComplete(dynamic status) {
 }
 
 class _StructuredEventView extends StatelessWidget {
-  const _StructuredEventView({required this.event});
+  const _StructuredEventView({required this.event, required this.sessionId});
   final Map<String, dynamic> event;
+  final String sessionId;
   @override
   Widget build(BuildContext context) {
+    final task = (event['task'] as Map?)?.cast<String, dynamic>();
+    if (task != null) {
+      return _BackgroundTaskView(
+        task: task,
+        fallbackStatus: event['status'],
+        sessionId: sessionId,
+      );
+    }
     final type = event['type']?.toString() ?? 'tool';
     final thinking = type == 'thinking' || type == 'reasoning';
     final edit = type == 'edit' || type == 'diff';
@@ -2869,6 +2892,127 @@ class _StructuredEventView extends StatelessWidget {
         ),
       ],
     );
+  }
+}
+
+class _BackgroundTaskView extends ConsumerStatefulWidget {
+  const _BackgroundTaskView({
+    required this.task,
+    required this.fallbackStatus,
+    required this.sessionId,
+  });
+
+  final Map<String, dynamic> task;
+  final dynamic fallbackStatus;
+  final String sessionId;
+
+  @override
+  ConsumerState<_BackgroundTaskView> createState() =>
+      _BackgroundTaskViewState();
+}
+
+class _BackgroundTaskViewState extends ConsumerState<_BackgroundTaskView> {
+  bool stopping = false;
+
+  @override
+  Widget build(BuildContext context) {
+    final task = widget.task;
+    final taskId = task['id']?.toString() ?? '';
+    final description = task['description']?.toString().trim() ?? '';
+    final status = (task['status'] ?? widget.fallbackStatus)
+        ?.toString()
+        .toUpperCase();
+    final running = status == 'RUNNING';
+    final log = task['logTail']?.toString() ?? '';
+    final statusLabel = switch (status) {
+      'RUNNING' => tr(context, '运行中', 'Running'),
+      'DONE' => tr(context, '已完成', 'Completed'),
+      'ERROR' => tr(context, '失败', 'Failed'),
+      'CANCELLED' => tr(context, '已停止', 'Stopped'),
+      _ => status ?? tr(context, '未知', 'Unknown'),
+    };
+    final statusColor = switch (status) {
+      'RUNNING' => context.colors.primary,
+      'ERROR' => context.colors.error,
+      _ => context.colors.onSurfaceVariant,
+    };
+    return ExpansionTile(
+      dense: true,
+      visualDensity: VisualDensity.compact,
+      minTileHeight: 48,
+      initiallyExpanded: running,
+      tilePadding: const EdgeInsets.only(left: 10, right: 2),
+      childrenPadding: const EdgeInsets.fromLTRB(36, 0, 10, 10),
+      leading: Icon(
+        running ? Icons.sync : Icons.terminal,
+        size: 18,
+        color: statusColor,
+      ),
+      title: Text(
+        description.isEmpty ? taskId : description,
+        maxLines: 2,
+        overflow: TextOverflow.ellipsis,
+        style: context.text.labelMedium,
+      ),
+      subtitle: Text(
+        statusLabel,
+        style: context.text.labelSmall?.copyWith(color: statusColor),
+      ),
+      trailing: running
+          ? SizedBox.square(
+              dimension: 48,
+              child: IconButton(
+                tooltip: tr(context, '停止后台任务', 'Stop background task'),
+                onPressed:
+                    stopping || taskId.isEmpty || widget.sessionId.isEmpty
+                    ? null
+                    : _stop,
+                icon: stopping
+                    ? const SizedBox.square(
+                        dimension: 18,
+                        child: CircularProgressIndicator(strokeWidth: 2),
+                      )
+                    : const Icon(Icons.stop_circle_outlined),
+              ),
+            )
+          : Icon(
+              _eventComplete(status)
+                  ? Icons.check_circle_outline
+                  : Icons.error_outline,
+              size: 18,
+              color: statusColor,
+            ),
+      children: [
+        Align(
+          alignment: Alignment.centerLeft,
+          child: SelectableText(
+            log.isEmpty
+                ? tr(context, '等待任务输出...', 'Waiting for task output...')
+                : log,
+            style: context.text.bodySmall?.copyWith(fontFamily: 'monospace'),
+            selectionControls: rizTextSelectionControls,
+            magnifierConfiguration: rizTextMagnifierConfiguration,
+          ),
+        ),
+      ],
+    );
+  }
+
+  Future<void> _stop() async {
+    setState(() => stopping = true);
+    try {
+      await ref
+          .read(appControllerProvider.notifier)
+          .stopTask(widget.sessionId, widget.task['id'].toString());
+    } catch (error) {
+      if (mounted) {
+        ScaffoldMessenger.of(
+          context,
+        ).showSnackBar(SnackBar(content: Text(error.toString())));
+      }
+    } finally {
+      if (mounted) setState(() => stopping = false);
+    }
   }
 }
 

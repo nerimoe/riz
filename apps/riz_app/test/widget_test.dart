@@ -70,6 +70,45 @@ class _QuestionController extends _ResponsiveController {
   );
 }
 
+class _BackgroundTaskController extends _ResponsiveController {
+  final stoppedTasks = <String>[];
+
+  @override
+  RizState build() => super.build().copyWith(
+    messages: const [
+      {
+        'id': 'task-message',
+        'sessionId': 's1',
+        'role': 'assistant',
+        'status': 'running',
+        'content': {
+          'text': '',
+          'structuredEvents': [
+            {
+              'index': 3,
+              'type': 'tool_result',
+              'name': 'run_command',
+              'status': 'RUNNING',
+              'task': {
+                'id': '00000000-0000-0000-0000-000000000003/task-3',
+                'description': 'clone repositories',
+                'status': 'RUNNING',
+                'logTail': 'Cloning riz...\n',
+                'supportsInput': false,
+              },
+            },
+          ],
+        },
+      },
+    ],
+  );
+
+  @override
+  Future<void> stopTask(String sessionId, String taskId) async {
+    stoppedTasks.add('$sessionId:$taskId');
+  }
+}
+
 class _EmptyProjectController extends AppController {
   @override
   RizState build() => const RizState(
@@ -697,6 +736,34 @@ void main() {
     expect(find.text('Chat'), findsOneWidget);
     expect(find.text('Files'), findsOneWidget);
     expect(find.text('Terminal'), findsOneWidget);
+    expect(tester.takeException(), isNull);
+  });
+
+  testWidgets('running background task shows live output and can be stopped', (
+    tester,
+  ) async {
+    tester.view.devicePixelRatio = 1;
+    tester.view.physicalSize = const Size(1000, 800);
+    addTearDown(tester.view.resetDevicePixelRatio);
+    addTearDown(tester.view.resetPhysicalSize);
+    final controller = _BackgroundTaskController();
+    await tester.pumpWidget(
+      ProviderScope(
+        overrides: [appControllerProvider.overrideWith(() => controller)],
+        child: const MaterialApp(home: RizHome()),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    expect(find.text('clone repositories'), findsOneWidget);
+    expect(find.text('Cloning riz...\n'), findsOneWidget);
+    final stop = find.byTooltip('Stop background task');
+    expect(stop, findsOneWidget);
+    await tester.tap(stop);
+    await tester.pump();
+    expect(controller.stoppedTasks, [
+      's1:00000000-0000-0000-0000-000000000003/task-3',
+    ]);
     expect(tester.takeException(), isNull);
   });
 }
