@@ -74,34 +74,55 @@ class _BackgroundTaskController extends _ResponsiveController {
   final stoppedTasks = <String>[];
 
   @override
-  RizState build() => super.build().copyWith(
-    messages: const [
-      {
-        'id': 'task-message',
-        'sessionId': 's1',
-        'role': 'assistant',
-        'status': 'running',
-        'content': {
-          'text': '',
-          'structuredEvents': [
+  RizState build() {
+    final base = super.build();
+    return base.copyWith(
+      snapshot: {
+        ...base.snapshot,
+        'sessions': [
+          for (final session in base.sessions)
+            {...session, 'status': 'running'},
+        ],
+      },
+      daemonGlobals: const {
+        'd1': DaemonGlobalData(
+          loaded: true,
+          providers: [
             {
-              'index': 3,
-              'type': 'tool_result',
-              'name': 'run_command',
-              'status': 'RUNNING',
-              'task': {
-                'id': '00000000-0000-0000-0000-000000000003/task-3',
-                'description': 'clone repositories',
-                'status': 'RUNNING',
-                'logTail': 'Cloning riz...\n',
-                'supportsInput': false,
-              },
+              'id': 'agy',
+              'capabilities': {'steering': true},
             },
           ],
-        },
+        ),
       },
-    ],
-  );
+      messages: const [
+        {
+          'id': 'task-message',
+          'sessionId': 's1',
+          'role': 'assistant',
+          'status': 'running',
+          'content': {
+            'text': 'Waiting for the background task.',
+            'structuredEvents': [
+              {
+                'index': 3,
+                'type': 'tool_result',
+                'name': 'run_command',
+                'status': 'RUNNING',
+                'task': {
+                  'id': '00000000-0000-0000-0000-000000000003/task-3',
+                  'description': 'clone repositories',
+                  'status': 'RUNNING',
+                  'logTail': 'Cloning riz...\n',
+                  'supportsInput': false,
+                },
+              },
+            ],
+          },
+        },
+      ],
+    );
+  }
 
   @override
   Future<void> stopTask(String sessionId, String taskId) async {
@@ -757,6 +778,8 @@ void main() {
 
     expect(find.text('clone repositories'), findsOneWidget);
     expect(find.text('Cloning riz...\n'), findsOneWidget);
+    expect(find.text('Steer the current task…'), findsOneWidget);
+    expect(find.text('Steer'), findsOneWidget);
     final stop = find.byTooltip('Stop background task');
     expect(stop, findsOneWidget);
     await tester.tap(stop);

@@ -77,6 +77,7 @@ struct RunningAgent {
     killer: Box<dyn ChildKiller + Send + Sync>,
     writer: Box<dyn Write + Send>,
     process_id: Option<u32>,
+    conversation_path: Option<PathBuf>,
     pending_permission: Option<Value>,
     pending_input: Option<Value>,
     stopped_tasks: HashSet<String>,
@@ -127,6 +128,26 @@ impl AgyProvider {
     pub fn pending_input(&self, session_id: &str) -> Option<Value> {
         let agent = self.running.lock().ok()?.get(session_id)?.clone();
         agent.lock().ok()?.pending_input.clone()
+    }
+
+    pub fn steer(&self, session_id: &str, prompt: &str, attachments: &[PathBuf]) -> Result<()> {
+        let agent = self
+            .running
+            .lock()
+            .unwrap()
+            .get(session_id)
+            .cloned()
+            .context("no active agent for session")?;
+        let mut running_agent = agent.lock().unwrap();
+        let conversation = running_agent
+            .conversation_path
+            .as_deref()
+            .context("agy conversation is not ready for steering")?;
+        if !conversation_accepts_steer(conversation)? {
+            bail!("agy is not waiting while a background task runs")
+        }
+        let prompt = prompt_with_attachments(prompt.to_owned(), attachments);
+        write_interactive_prompt(&mut running_agent.writer, &prompt)
     }
 
     pub fn stop_task(&self, session_id: &str, task_id: &str) -> Result<()> {
@@ -235,7 +256,7 @@ impl AgentProvider for AgyProvider {
     }
     fn capabilities(&self) -> ProviderCapabilities {
         ProviderCapabilities {
-            steering: false,
+            steering: true,
             image_input: true,
             image_output: false,
             thinking: true,
@@ -327,14 +348,12 @@ impl AgentProvider for AgyProvider {
             .unwrap_or(-1);
         let session_id = request.session_id.clone();
         let running = self.running.clone();
-        let mut prompt = request.prompt;
-        for a in &request.attachments {
-            prompt.push('\n');
-            prompt.push('@');
-            prompt.push_str(&a.to_string_lossy());
-        }
+        let prompt = prompt_with_attachments(request.prompt, &request.attachments);
         let completion_prompt = prompt.clone();
         let conversation_before_prompt = before.clone();
+        let initial_conversation_path = requested_conversation_id
+            .as_deref()
+            .and_then(conversation_file);
         let command_project_id = requested_project_id.clone();
         let creating_project = command_project_id.is_none();
         let expected_cwd = request.cwd.clone();
@@ -384,6 +403,7 @@ impl AgentProvider for AgyProvider {
                 killer: child.clone_killer(),
                 writer,
                 process_id,
+                conversation_path: initial_conversation_path,
                 pending_permission: None,
                 pending_input: None,
                 stopped_tasks: HashSet::new(),
@@ -414,6 +434,9 @@ impl AgentProvider for AgyProvider {
                                 .filter(|path| Some(path) != conversation_before_prompt.as_ref())
                         });
                     if let Some(path) = conversation_path {
+                        if let Ok(mut running_agent) = monitor_agent.lock() {
+                            running_agent.conversation_path = Some(path.clone());
+                        }
                         if let Ok(events) = read_structured_events(&path) {
                             for mut event in events.into_iter().filter(|event| {
                                 event["index"].as_i64().unwrap_or(-1) > baseline_step
@@ -883,8 +906,9 @@ fn read_transcript_events(conversation_path: &Path) -> Result<Vec<Value>> {
                     "name": kind.to_ascii_lowercase(),
                     "text": content,
                 });
-                if let Some(task) =
-                    background_task_details(conversation_path, original_content, status)
+                if kind == "RUN_COMMAND"
+                    && let Some(task) =
+                        background_task_details(conversation_path, original_content, status)
                 {
                     event["task"] = task;
                 }
@@ -901,6 +925,23 @@ fn explicit_user_request(content: &str) -> &str {
         .split_once("<USER_REQUEST>\n")
         .and_then(|(_, rest)| rest.split_once("\n</USER_REQUEST>"))
         .map_or(content, |(request, _)| request)
+}
+
+fn prompt_with_attachments(mut prompt: String, attachments: &[PathBuf]) -> String {
+    for attachment in attachments {
+        prompt.push('\n');
+        prompt.push('@');
+        prompt.push_str(&attachment.to_string_lossy());
+    }
+    prompt
+}
+
+fn write_interactive_prompt(writer: &mut dyn Write, prompt: &str) -> Result<()> {
+    writer.write_all(b"\x1b[200~")?;
+    writer.write_all(prompt.as_bytes())?;
+    writer.write_all(b"\x1b[201~\r")?;
+    writer.flush()?;
+    Ok(())
 }
 
 fn question_input(event: &Value) -> Option<Value> {
@@ -1309,7 +1350,8 @@ fn background_task_completions(rows: &[Value]) -> HashMap<String, BackgroundTask
         .filter(|row| row["source"] == "SYSTEM" && row["type"] == "SYSTEM_MESSAGE")
         .filter_map(|row| {
             let content = row["content"].as_str()?;
-            if !content.contains("finished with result") {
+            let cancelled = content.contains("was canceled with result");
+            if !content.contains("finished with result") && !cancelled {
                 return None;
             }
             let task_id = background_task_id(content)?;
@@ -1319,12 +1361,52 @@ fn background_task_completions(rows: &[Value]) -> HashMap<String, BackgroundTask
             Some((
                 task_id,
                 BackgroundTaskCompletion {
-                    status: if nonzero_exit { "ERROR" } else { "DONE" }.to_owned(),
+                    status: if cancelled {
+                        "CANCELLED"
+                    } else if nonzero_exit {
+                        "ERROR"
+                    } else {
+                        "DONE"
+                    }
+                    .to_owned(),
                     text: content.to_owned(),
                 },
             ))
         })
         .collect()
+}
+
+fn conversation_accepts_steer(path: &Path) -> Result<bool> {
+    let contents = fs::read_to_string(transcript_path(path)?)?;
+    let rows = contents
+        .lines()
+        .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+        .collect::<Vec<_>>();
+    let completions = background_task_completions(&rows);
+    let active_task_step = rows
+        .iter()
+        .filter(|row| {
+            row["source"] == "MODEL"
+                && row["status"] == "RUNNING"
+                && row["content"]
+                    .as_str()
+                    .and_then(background_task_id)
+                    .is_some_and(|task_id| !completions.contains_key(&task_id))
+        })
+        .filter_map(|row| row["step_index"].as_i64())
+        .max();
+    let Some(active_task_step) = active_task_step else {
+        return Ok(false);
+    };
+    Ok(rows.iter().any(|row| {
+        row["step_index"].as_i64().unwrap_or(-1) > active_task_step
+            && row["source"] == "MODEL"
+            && row["type"] == "PLANNER_RESPONSE"
+            && row["status"] == "DONE"
+            && row["content"]
+                .as_str()
+                .is_some_and(|content| !content.trim().is_empty())
+    }))
 }
 
 #[derive(Debug, Default)]
@@ -1846,6 +1928,57 @@ Quota available
         );
         assert_eq!(stopped["status"], "CANCELLED");
         assert_eq!(stopped["task"]["status"], "CANCELLED");
+
+        assert!(!conversation_accepts_steer(&conversation).unwrap());
+        fs::write(
+            &transcript,
+            concat!(
+                "{\"step_index\":3,\"source\":\"MODEL\",\"type\":\"RUN_COMMAND\",\"status\":\"RUNNING\",\"content\":\"Tool is running with task id: 00000000-0000-0000-0000-000000000003/task-3\\nTask Description: git clone repositories\"}\n",
+                "{\"step_index\":4,\"source\":\"MODEL\",\"type\":\"PLANNER_RESPONSE\",\"status\":\"DONE\",\"content\":\"waiting for clone\"}\n"
+            ),
+        )
+        .unwrap();
+        assert!(conversation_accepts_steer(&conversation).unwrap());
+        let mut transcript_file = fs::OpenOptions::new()
+            .append(true)
+            .open(&transcript)
+            .unwrap();
+        writeln!(
+            transcript_file,
+            "{}",
+            json!({
+                "step_index": 5,
+                "source": "SYSTEM",
+                "type": "SYSTEM_MESSAGE",
+                "status": "DONE",
+                "content": "Task id \\\"00000000-0000-0000-0000-000000000003/task-3\\\" was canceled with result: context canceled by manage_task"
+            })
+        )
+        .unwrap();
+        assert!(!conversation_accepts_steer(&conversation).unwrap());
+        let cancelled = read_structured_events(&conversation).unwrap();
+        assert_eq!(cancelled[0]["task"]["status"], "CANCELLED");
+        assert_eq!(
+            cancelled
+                .iter()
+                .filter(|event| !event["task"].is_null())
+                .count(),
+            1
+        );
+    }
+
+    #[test]
+    fn interactive_prompt_uses_bracketed_paste_and_includes_attachments() {
+        let prompt = prompt_with_attachments(
+            "redirect the task".to_owned(),
+            &[PathBuf::from("/tmp/reference.png")],
+        );
+        let mut bytes = Vec::new();
+        write_interactive_prompt(&mut bytes, &prompt).unwrap();
+        assert_eq!(
+            bytes,
+            b"\x1b[200~redirect the task\n@/tmp/reference.png\x1b[201~\r"
+        );
     }
 
     #[cfg(unix)]

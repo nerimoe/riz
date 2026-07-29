@@ -334,6 +334,19 @@ async fn dispatch(state: &AppState, request: &Envelope) -> Result<Value> {
                     ),
                 )?;
             }
+            if p["delivery"] == "steer" {
+                let text = content["text"].as_str().unwrap_or_default();
+                let attachments = content["attachments"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .filter_map(|attachment| attachment["path"].as_str().map(PathBuf::from))
+                    .collect::<Vec<_>>();
+                state.agy.steer(id, text, &attachments)?;
+                let msg = state.db.add_message(id, "user", content, "completed")?;
+                state.emit("message.changed", msg.clone())?;
+                return Ok(msg);
+            }
             if state.db.session(id)?.is_some_and(|session| {
                 matches!(
                     session["title"].as_str(),
@@ -485,6 +498,7 @@ async fn dispatch(state: &AppState, request: &Envelope) -> Result<Value> {
             Ok(s)
         }
         "provider.commands" => Ok(json!({"commands":state.agy.commands()})),
+        "provider.list" => Ok(json!({"providers":[state.agy.detect()]})),
         "provider.models" => Ok(json!({"models":state.agy.models()?})),
         "fs.list" => files::list(
             &files::path_from(p, "path")?,

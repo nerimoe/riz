@@ -124,6 +124,7 @@ class AppController extends Notifier<RizState> {
     );
 
     final results = await Future.wait([
+      _loadGlobalList(daemon, 'provider.list', 'providers'),
       _loadGlobalList(daemon, 'provider.models', 'models'),
       _loadGlobalList(daemon, 'provider.commands', 'commands'),
       _loadGlobalList(daemon, 'skill.list', 'skills'),
@@ -131,12 +132,15 @@ class AppController extends Notifier<RizState> {
     if (_clients[connectionId] != daemon) return;
 
     List<Map<String, dynamic>>? models;
+    List<Map<String, dynamic>>? providers;
     List<Map<String, dynamic>>? commands;
     List<Map<String, dynamic>>? skills;
     final errors = <String>[];
     for (final result in results) {
       if (result.error != null) {
         errors.add('${result.key}: ${result.error}');
+      } else if (result.key == 'providers') {
+        providers = result.values;
       } else if (result.key == 'models') {
         models = result.values;
       } else if (result.key == 'commands') {
@@ -154,6 +158,7 @@ class AppController extends Notifier<RizState> {
         loading: false,
         loaded: errors.isEmpty,
         models: models,
+        providers: providers,
         commands: commands,
         globalSkills: skills,
         error: errors.isEmpty ? null : errors.join('\n'),
@@ -325,7 +330,10 @@ class AppController extends Notifier<RizState> {
       if (index < 0) {
         cache.messages = [...cache.messages, value];
       } else {
-        cache.messages = [...cache.messages]..[index] = value;
+        cache.messages = [
+          ...cache.messages.where((message) => message['id'] != value['id']),
+          value,
+        ];
       }
       _showCachedSession(connectionId, sessionId!, cache);
       return;

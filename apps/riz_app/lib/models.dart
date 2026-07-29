@@ -72,6 +72,7 @@ class DaemonGlobalData {
     this.models = const [],
     this.commands = const [],
     this.globalSkills = const [],
+    this.providers = const [],
     this.quota,
     this.error,
   });
@@ -81,6 +82,7 @@ class DaemonGlobalData {
   final List<Map<String, dynamic>> models;
   final List<Map<String, dynamic>> commands;
   final List<Map<String, dynamic>> globalSkills;
+  final List<Map<String, dynamic>> providers;
   final Map<String, dynamic>? quota;
   final String? error;
 
@@ -90,6 +92,7 @@ class DaemonGlobalData {
     List<Map<String, dynamic>>? models,
     List<Map<String, dynamic>>? commands,
     List<Map<String, dynamic>>? globalSkills,
+    List<Map<String, dynamic>>? providers,
     Map<String, dynamic>? quota,
     bool clearQuota = false,
     String? error,
@@ -100,6 +103,7 @@ class DaemonGlobalData {
     models: models ?? this.models,
     commands: commands ?? this.commands,
     globalSkills: globalSkills ?? this.globalSkills,
+    providers: providers ?? this.providers,
     quota: clearQuota ? null : quota ?? this.quota,
     error: clearError ? null : error ?? this.error,
   );

@@ -791,7 +791,7 @@ impl Database {
     }
     pub fn messages(&self, session_id: &str) -> Result<Vec<Value>> {
         let conn = self.conn();
-        let mut s=conn.prepare("SELECT id,session_id,role,content,status,created_at,updated_at FROM messages WHERE session_id=?1 ORDER BY created_at,id")?;
+        let mut s=conn.prepare("SELECT id,session_id,role,content,status,created_at,updated_at FROM messages WHERE session_id=?1 ORDER BY updated_at,id")?;
         Ok(s.query_map([session_id], row_message)?
             .collect::<rusqlite::Result<Vec<_>>>()?)
     }

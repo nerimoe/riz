@@ -1761,7 +1761,7 @@ class _ChatViewState extends ConsumerState<_ChatView> {
   final composer = TextEditingController();
   final scroll = ScrollController();
   final attachments = <Map<String, dynamic>>[];
-  String delivery = 'queue';
+  String delivery = 'steer';
   String? optionSessionId;
   String? selectedModel;
   bool sending = false;
@@ -1914,6 +1914,7 @@ class _ChatViewState extends ConsumerState<_ChatView> {
     if (optionSessionId != session['id']) {
       optionSessionId = session['id'] as String;
       selectedModel = null;
+      delivery = 'steer';
     }
     final globals = state.activeDaemonGlobals ?? const DaemonGlobalData();
     final slashItems = [
@@ -1940,6 +1941,30 @@ class _ChatViewState extends ConsumerState<_ChatView> {
       'waiting_permission',
       'waiting_input',
     ].contains(session['status']);
+    final providerId = session['provider']?.toString() ?? 'agy';
+    final provider = globals.providers
+        .where((item) => item['id'] == providerId)
+        .firstOrNull;
+    final providerCapabilities = provider?['capabilities'] as Map?;
+    final providerSupportsSteering = providerCapabilities?['steering'] == true;
+    final hasWaitingBackgroundTask = state.messages.any((message) {
+      if (message['role'] != 'assistant') return false;
+      final content = message['content'] as Map?;
+      if ((content?['text']?.toString().trim() ?? '').isEmpty) return false;
+      return (content?['structuredEvents'] as List? ?? const []).any((event) {
+        if (event is! Map || event['task'] is! Map) return false;
+        final task = event['task'] as Map;
+        return (task['status'] ?? event['status'])?.toString().toUpperCase() ==
+            'RUNNING';
+      });
+    });
+    final canSteer =
+        session['status'] == 'running' &&
+        providerSupportsSteering &&
+        hasWaitingBackgroundTask;
+    final effectiveDelivery = canSteer && delivery == 'steer'
+        ? 'steer'
+        : 'queue';
     return Column(
       children: [
         if (context.isExpanded)
@@ -2142,7 +2167,9 @@ class _ChatViewState extends ConsumerState<_ChatView> {
                         ),
                       AdaptiveComposerField(
                         controller: composer,
-                        hintText: running
+                        hintText: canSteer
+                            ? tr(context, '引导当前任务…', 'Steer the current task…')
+                            : running
                             ? tr(context, '排队下一条消息…', 'Queue a follow-up…')
                             : tr(
                                 context,
@@ -2283,7 +2310,7 @@ class _ChatViewState extends ConsumerState<_ChatView> {
                                   mainAxisSize: MainAxisSize.min,
                                   children: [
                                     Text(
-                                      delivery == 'queue'
+                                      effectiveDelivery == 'queue'
                                           ? tr(context, '排队', 'Queue')
                                           : tr(context, '引导', 'Steer'),
                                       style: context.text.labelMedium,
@@ -2299,13 +2326,15 @@ class _ChatViewState extends ConsumerState<_ChatView> {
                                 ),
                                 PopupMenuItem(
                                   value: 'steer',
-                                  enabled: false,
+                                  enabled: canSteer,
                                   child: Text(
-                                    tr(
-                                      context,
-                                      '引导（agy 不支持）',
-                                      'Steer (unsupported by agy)',
-                                    ),
+                                    canSteer
+                                        ? tr(context, '引导', 'Steer')
+                                        : tr(
+                                            context,
+                                            '引导（当前不可用）',
+                                            'Steer (currently unavailable)',
+                                          ),
                                   ),
                                 ),
                               ],
@@ -2330,7 +2359,7 @@ class _ChatViewState extends ConsumerState<_ChatView> {
                                       await ctl.sendMessage(
                                         text,
                                         attachments: files,
-                                        mode: delivery,
+                                        mode: effectiveDelivery,
                                         model: selectedModel,
                                       );
                                     } catch (error) {
