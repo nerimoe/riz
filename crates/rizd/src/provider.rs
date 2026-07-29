@@ -357,12 +357,15 @@ impl AgentProvider for AgyProvider {
                 .insert(session_id.clone(), agent.clone());
             let monitor_stop = Arc::new(AtomicBool::new(false));
             let monitor_stopped = monitor_stop.clone();
+            let completion_confirmed = Arc::new(AtomicBool::new(false));
+            let monitor_completion_confirmed = completion_confirmed.clone();
             let monitor_agent = agent.clone();
             let monitor_conversation_id = request.conversation_id.clone();
             let monitor_events = request.on_event.clone();
             let completion_monitor = std::thread::spawn(move || {
                 let mut emitted_events = HashSet::new();
                 let mut emitted_text = String::new();
+                let mut completion_tracker = TurnCompletionTracker::default();
                 while !monitor_stopped.load(Ordering::Relaxed) {
                     let conversation_path = monitor_conversation_id
                         .as_deref()
@@ -399,9 +402,11 @@ impl AgentProvider for AgyProvider {
                                 }
                             }
                         }
-                        if conversation_turn_completed(&path, &completion_prompt, baseline_step)
-                            .unwrap_or(false)
+                        if let Ok(Some(progress)) =
+                            conversation_turn_progress(&path, &completion_prompt, baseline_step)
+                            && completion_tracker.should_complete(progress)
                         {
+                            monitor_completion_confirmed.store(true, Ordering::Relaxed);
                             if let Ok(mut running_agent) = monitor_agent.lock() {
                                 let _ = running_agent.writer.write_all(b"\x03\x03");
                                 let _ = running_agent.writer.flush();
@@ -462,6 +467,12 @@ impl AgentProvider for AgyProvider {
             if !status.success() {
                 bail!(
                     "agy exited with status {status:?}: {}",
+                    strip_ansi(&String::from_utf8_lossy(&bytes))
+                )
+            }
+            if !completion_confirmed.load(Ordering::Relaxed) {
+                bail!(
+                    "agy exited before the turn reached a confirmed terminal state: {}",
                     strip_ansi(&String::from_utf8_lossy(&bytes))
                 )
             }
@@ -751,11 +762,24 @@ fn read_transcript_events(conversation_path: &Path) -> Result<Vec<Value>> {
         .join(id)
         .join(".system_generated/logs/transcript.jsonl");
     let contents = fs::read_to_string(transcript)?;
+    let rows = contents
+        .lines()
+        .filter(|line| !line.trim().is_empty())
+        .map(serde_json::from_str::<Value>)
+        .collect::<serde_json::Result<Vec<_>>>()?;
+    let task_completions = background_task_completions(&rows);
     let mut events = Vec::new();
-    for line in contents.lines().filter(|line| !line.trim().is_empty()) {
-        let row: Value = serde_json::from_str(line)?;
+    for row in rows {
         let index = row["step_index"].as_i64().unwrap_or_default();
-        let status = row["status"].as_str().unwrap_or("UNKNOWN");
+        let original_content = row["content"].as_str().unwrap_or_default();
+        let completion = (row["status"] == "RUNNING")
+            .then(|| background_task_id(original_content))
+            .flatten()
+            .and_then(|task_id| task_completions.get(&task_id));
+        let status = completion.map_or_else(
+            || row["status"].as_str().unwrap_or("UNKNOWN"),
+            |completion| completion.status.as_str(),
+        );
         if let Some(calls) = row["tool_calls"].as_array() {
             for call in calls {
                 let name = call["name"].as_str().unwrap_or("Tool");
@@ -769,7 +793,7 @@ fn read_transcript_events(conversation_path: &Path) -> Result<Vec<Value>> {
                 }));
             }
         }
-        let content = row["content"].as_str().unwrap_or_default();
+        let content = completion.map_or(original_content, |completion| completion.text.as_str());
         if content.trim().is_empty() {
             continue;
         }
@@ -1064,7 +1088,76 @@ fn conversation_max_step(path: &Path) -> Result<i64> {
         .unwrap_or(-1))
 }
 
-fn conversation_turn_completed(path: &Path, prompt: &str, baseline_step: i64) -> Result<bool> {
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct ConversationTurnProgress {
+    final_response_step: Option<i64>,
+    has_active_work: bool,
+}
+
+#[derive(Debug, Clone)]
+struct BackgroundTaskCompletion {
+    status: String,
+    text: String,
+}
+
+fn background_task_id(content: &str) -> Option<String> {
+    regex::Regex::new(r"[0-9a-fA-F-]{36}/task-[0-9]+")
+        .ok()?
+        .find(content)
+        .map(|matched| matched.as_str().to_owned())
+}
+
+fn background_task_completions(rows: &[Value]) -> HashMap<String, BackgroundTaskCompletion> {
+    rows.iter()
+        .filter(|row| row["source"] == "SYSTEM" && row["type"] == "SYSTEM_MESSAGE")
+        .filter_map(|row| {
+            let content = row["content"].as_str()?;
+            if !content.contains("finished with result") {
+                return None;
+            }
+            let task_id = background_task_id(content)?;
+            let nonzero_exit = regex::Regex::new(r"exited with code\s+([1-9][0-9]*)")
+                .ok()
+                .is_some_and(|pattern| pattern.is_match(content));
+            Some((
+                task_id,
+                BackgroundTaskCompletion {
+                    status: if nonzero_exit { "ERROR" } else { "DONE" }.to_owned(),
+                    text: content.to_owned(),
+                },
+            ))
+        })
+        .collect()
+}
+
+#[derive(Debug, Default)]
+struct TurnCompletionTracker {
+    planner_seen_while_working: Option<i64>,
+}
+
+impl TurnCompletionTracker {
+    fn should_complete(&mut self, progress: ConversationTurnProgress) -> bool {
+        if progress.has_active_work {
+            if let Some(step) = progress.final_response_step {
+                self.planner_seen_while_working = Some(
+                    self.planner_seen_while_working
+                        .map_or(step, |current| current.max(step)),
+                );
+            }
+            return false;
+        }
+        progress.final_response_step.is_some_and(|step| {
+            self.planner_seen_while_working
+                .is_none_or(|floor| step > floor)
+        })
+    }
+}
+
+fn conversation_turn_progress(
+    path: &Path,
+    prompt: &str,
+    baseline_step: i64,
+) -> Result<Option<ConversationTurnProgress>> {
     let contents = fs::read_to_string(transcript_path(path)?)?;
     let rows = contents
         .lines()
@@ -1082,16 +1175,40 @@ fn conversation_turn_completed(path: &Path, prompt: &str, baseline_step: i64) ->
         .filter_map(|row| row["step_index"].as_i64())
         .max();
     let Some(user_step) = user_step else {
-        return Ok(false);
+        return Ok(None);
     };
-    Ok(rows.iter().any(|row| {
-        row["step_index"].as_i64().unwrap_or(-1) > user_step
-            && row["source"] == "MODEL"
-            && row["type"] == "PLANNER_RESPONSE"
-            && row["status"] == "DONE"
+    let mut latest_steps = HashMap::<i64, &Value>::new();
+    for row in &rows {
+        let step = row["step_index"].as_i64().unwrap_or(-1);
+        if step > user_step {
+            latest_steps.insert(step, row);
+        }
+    }
+    let final_response_step = latest_steps
+        .iter()
+        .filter(|(_, row)| {
+            row["source"] == "MODEL"
+                && row["type"] == "PLANNER_RESPONSE"
+                && row["status"] == "DONE"
+                && row["content"]
+                    .as_str()
+                    .is_some_and(|content| !content.trim().is_empty())
+        })
+        .map(|(step, _)| *step)
+        .max();
+    let task_completions = background_task_completions(&rows);
+    let has_active_work = latest_steps.values().any(|row| {
+        row["source"] == "MODEL"
+            && row["type"] != "PLANNER_RESPONSE"
+            && row["status"] == "RUNNING"
             && row["content"]
                 .as_str()
-                .is_some_and(|content| !content.trim().is_empty())
+                .and_then(background_task_id)
+                .is_none_or(|task_id| !task_completions.contains_key(&task_id))
+    });
+    Ok(Some(ConversationTurnProgress {
+        final_response_step,
+        has_active_work,
     }))
 }
 
@@ -1369,8 +1486,115 @@ Quota available
             ),
         )
         .unwrap();
-        assert!(conversation_turn_completed(&conversation, "new prompt", 4).unwrap());
-        assert!(!conversation_turn_completed(&conversation, "new prompt", 5).unwrap());
+        assert_eq!(
+            conversation_turn_progress(&conversation, "new prompt", 4).unwrap(),
+            Some(ConversationTurnProgress {
+                final_response_step: Some(6),
+                has_active_work: false,
+            })
+        );
+        assert!(
+            conversation_turn_progress(&conversation, "new prompt", 5)
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn running_background_work_requires_a_later_final_response() {
+        let temp = tempfile::tempdir().unwrap();
+        let provider_root = temp.path().join("antigravity-cli");
+        let conversation = provider_root.join("conversations/test.db");
+        let transcript = provider_root.join("brain/test/.system_generated/logs/transcript.jsonl");
+        fs::create_dir_all(conversation.parent().unwrap()).unwrap();
+        fs::create_dir_all(transcript.parent().unwrap()).unwrap();
+        fs::write(&conversation, []).unwrap();
+        fs::write(
+            &transcript,
+            concat!(
+                "{\"step_index\":5,\"source\":\"USER_EXPLICIT\",\"type\":\"USER_INPUT\",\"status\":\"DONE\",\"content\":\"clone repositories\"}\n",
+                "{\"step_index\":6,\"source\":\"MODEL\",\"type\":\"RUN_COMMAND\",\"status\":\"RUNNING\",\"content\":\"Tool is running with task id: 00000000-0000-0000-0000-000000000006/task-6\"}\n",
+                "{\"step_index\":7,\"source\":\"MODEL\",\"type\":\"PLANNER_RESPONSE\",\"status\":\"DONE\",\"content\":\"running in background\"}\n"
+            ),
+        )
+        .unwrap();
+        let mut tracker = TurnCompletionTracker::default();
+        let running = conversation_turn_progress(&conversation, "clone repositories", 4)
+            .unwrap()
+            .unwrap();
+        assert!(running.has_active_work);
+        assert!(!tracker.should_complete(running));
+
+        fs::write(
+            &transcript,
+            concat!(
+                "{\"step_index\":5,\"source\":\"USER_EXPLICIT\",\"type\":\"USER_INPUT\",\"status\":\"DONE\",\"content\":\"clone repositories\"}\n",
+                "{\"step_index\":6,\"source\":\"MODEL\",\"type\":\"RUN_COMMAND\",\"status\":\"RUNNING\",\"content\":\"Tool is running with task id: 00000000-0000-0000-0000-000000000006/task-6\"}\n",
+                "{\"step_index\":7,\"source\":\"MODEL\",\"type\":\"PLANNER_RESPONSE\",\"status\":\"DONE\",\"content\":\"running in background\"}\n",
+                "{\"step_index\":8,\"source\":\"SYSTEM\",\"type\":\"SYSTEM_MESSAGE\",\"status\":\"DONE\",\"content\":\"Task id \\\"00000000-0000-0000-0000-000000000006/task-6\\\" finished with result: The command exited with code 0.\"}\n"
+            ),
+        )
+        .unwrap();
+        let old_response = conversation_turn_progress(&conversation, "clone repositories", 4)
+            .unwrap()
+            .unwrap();
+        assert!(!old_response.has_active_work);
+        assert!(!tracker.should_complete(old_response));
+
+        fs::write(
+            &transcript,
+            concat!(
+                "{\"step_index\":5,\"source\":\"USER_EXPLICIT\",\"type\":\"USER_INPUT\",\"status\":\"DONE\",\"content\":\"clone repositories\"}\n",
+                "{\"step_index\":6,\"source\":\"MODEL\",\"type\":\"RUN_COMMAND\",\"status\":\"RUNNING\",\"content\":\"Tool is running with task id: 00000000-0000-0000-0000-000000000006/task-6\"}\n",
+                "{\"step_index\":7,\"source\":\"MODEL\",\"type\":\"PLANNER_RESPONSE\",\"status\":\"DONE\",\"content\":\"running in background\"}\n",
+                "{\"step_index\":8,\"source\":\"SYSTEM\",\"type\":\"SYSTEM_MESSAGE\",\"status\":\"DONE\",\"content\":\"Task id \\\"00000000-0000-0000-0000-000000000006/task-6\\\" finished with result: The command exited with code 0.\"}\n",
+                "{\"step_index\":9,\"source\":\"MODEL\",\"type\":\"PLANNER_RESPONSE\",\"status\":\"DONE\",\"content\":\"all repositories cloned\"}\n"
+            ),
+        )
+        .unwrap();
+        let final_response = conversation_turn_progress(&conversation, "clone repositories", 4)
+            .unwrap()
+            .unwrap();
+        assert!(tracker.should_complete(final_response));
+        let events = read_structured_events(&conversation).unwrap();
+        let task = events
+            .iter()
+            .find(|event| event["index"] == 6 && event["type"] == "tool_result")
+            .unwrap();
+        assert_eq!(task["status"], "DONE");
+        assert!(
+            task["text"]
+                .as_str()
+                .unwrap()
+                .contains("exited with code 0")
+        );
+    }
+
+    #[test]
+    fn transcript_progress_uses_latest_step_status_and_ignores_old_turns() {
+        let temp = tempfile::tempdir().unwrap();
+        let provider_root = temp.path().join("antigravity-cli");
+        let conversation = provider_root.join("conversations/test.db");
+        let transcript = provider_root.join("brain/test/.system_generated/logs/transcript.jsonl");
+        fs::create_dir_all(conversation.parent().unwrap()).unwrap();
+        fs::create_dir_all(transcript.parent().unwrap()).unwrap();
+        fs::write(&conversation, []).unwrap();
+        fs::write(
+            &transcript,
+            concat!(
+                "{\"step_index\":1,\"source\":\"MODEL\",\"type\":\"RUN_COMMAND\",\"status\":\"RUNNING\",\"content\":\"old task\"}\n",
+                "{\"step_index\":5,\"source\":\"USER_EXPLICIT\",\"type\":\"USER_INPUT\",\"status\":\"DONE\",\"content\":\"new prompt\"}\n",
+                "{\"step_index\":6,\"source\":\"MODEL\",\"type\":\"RUN_COMMAND\",\"status\":\"RUNNING\",\"content\":\"new task\"}\n",
+                "{\"step_index\":6,\"source\":\"MODEL\",\"type\":\"RUN_COMMAND\",\"status\":\"ERROR\",\"content\":\"failed\"}\n",
+                "{\"step_index\":7,\"source\":\"MODEL\",\"type\":\"PLANNER_RESPONSE\",\"status\":\"DONE\",\"content\":\"reported failure\"}\n"
+            ),
+        )
+        .unwrap();
+        let progress = conversation_turn_progress(&conversation, "new prompt", 4)
+            .unwrap()
+            .unwrap();
+        assert_eq!(progress.final_response_step, Some(7));
+        assert!(!progress.has_active_work);
     }
 
     #[test]

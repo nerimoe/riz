@@ -4,6 +4,7 @@ use rusqlite::{Connection, OptionalExtension, params};
 use serde::Serialize;
 use serde_json::{Value, json};
 use std::{
+    collections::HashMap,
     path::{Path, PathBuf},
     sync::{Arc, Mutex},
 };
@@ -36,7 +37,7 @@ impl Database {
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)?;
         }
-        let conn = Connection::open(path)?;
+        let mut conn = Connection::open(path)?;
         conn.pragma_update(None, "journal_mode", "WAL")?;
         conn.pragma_update(None, "foreign_keys", "ON")?;
         initialize_schema(&conn)?;
@@ -54,6 +55,13 @@ impl Database {
             "UPDATE terminal_metadata SET status='interrupted',updated_at=?1 WHERE status='running'",
             [now()],
         )?;
+        let reconciled = reconcile_false_completed_background_tasks(&mut conn)?;
+        if reconciled > 0 {
+            tracing::warn!(
+                sessions = reconciled,
+                "corrected completed sessions with unresolved background tasks"
+            );
+        }
         let projects_root = path
             .parent()
             .unwrap_or_else(|| Path::new("."))
@@ -889,6 +897,81 @@ impl Database {
     }
 }
 
+fn reconcile_false_completed_background_tasks(conn: &mut Connection) -> Result<usize> {
+    let candidates = {
+        let mut statement = conn.prepare(
+            "SELECT s.id,m.id,m.content,t.id
+             FROM sessions s
+             JOIN messages m ON m.id=(
+                 SELECT id FROM messages
+                 WHERE session_id=s.id AND role='assistant'
+                 ORDER BY created_at DESC,id DESC LIMIT 1
+             )
+             JOIN turns t ON t.id=(
+                 SELECT id FROM turns
+                 WHERE session_id=s.id
+                 ORDER BY created_at DESC,id DESC LIMIT 1
+             )
+             WHERE s.status='completed' AND m.status='completed' AND t.status='completed'",
+        )?;
+        statement
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, String>(3)?,
+                ))
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?
+    };
+    let affected = candidates
+        .into_iter()
+        .filter(|(_, _, content, _)| has_unresolved_running_event(content))
+        .collect::<Vec<_>>();
+    if affected.is_empty() {
+        return Ok(0);
+    }
+    let timestamp = now();
+    let transaction = conn.transaction()?;
+    for (session_id, message_id, _, turn_id) in &affected {
+        transaction.execute(
+            "UPDATE sessions SET status='interrupted',updated_at=?2 WHERE id=?1",
+            params![session_id, timestamp],
+        )?;
+        transaction.execute(
+            "UPDATE turns SET status='interrupted',updated_at=?2 WHERE id=?1",
+            params![turn_id, timestamp],
+        )?;
+        transaction.execute(
+            "UPDATE messages SET status='interrupted',updated_at=?2 WHERE id=?1",
+            params![message_id, timestamp],
+        )?;
+    }
+    transaction.commit()?;
+    Ok(affected.len())
+}
+
+fn has_unresolved_running_event(content: &str) -> bool {
+    let Ok(content) = serde_json::from_str::<Value>(content) else {
+        return false;
+    };
+    let mut statuses = HashMap::<String, &str>::new();
+    for event in content["structuredEvents"].as_array().into_iter().flatten() {
+        let event_type = event["type"].as_str().unwrap_or_default();
+        if matches!(event_type, "user" | "text" | "title") {
+            continue;
+        }
+        let key = format!(
+            "{}:{event_type}:{}",
+            event["index"],
+            event["name"].as_str().unwrap_or_default()
+        );
+        statuses.insert(key, event["status"].as_str().unwrap_or("UNKNOWN"));
+    }
+    statuses.values().any(|status| *status == "RUNNING")
+}
+
 fn row_project_base(r: &rusqlite::Row<'_>) -> rusqlite::Result<Value> {
     Ok(json!({
         "id": r.get::<_, String>(0)?,
@@ -1556,6 +1639,93 @@ mod tests {
         assert_eq!(turn["messageId"], message_id);
         assert_eq!(turn["status"], "interrupted");
         assert_eq!(reopened.turns(Some(&session_id)).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn completed_session_with_unresolved_background_task_is_reconciled() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("riz.db");
+        let (session_id, turn_id, assistant_id) = {
+            let db = Database::open(&path).unwrap();
+            let session = db
+                .create_session(
+                    None,
+                    Some("Background task"),
+                    "agy",
+                    None,
+                    &directory.path().join("sessions"),
+                )
+                .unwrap();
+            let user = db
+                .add_message(
+                    session["id"].as_str().unwrap(),
+                    "user",
+                    json!({"text":"clone repositories"}),
+                    "completed",
+                )
+                .unwrap();
+            let turn = db
+                .create_turn(
+                    session["id"].as_str().unwrap(),
+                    user["id"].as_str().unwrap(),
+                )
+                .unwrap();
+            db.set_turn_status(turn["id"].as_str().unwrap(), "completed")
+                .unwrap();
+            let assistant = db
+                .add_message(
+                    session["id"].as_str().unwrap(),
+                    "assistant",
+                    json!({
+                        "text":"running in background",
+                        "structuredEvents":[{
+                            "index":3,
+                            "type":"tool_result",
+                            "name":"run_command",
+                            "status":"RUNNING"
+                        }]
+                    }),
+                    "completed",
+                )
+                .unwrap();
+            (
+                session["id"].as_str().unwrap().to_owned(),
+                turn["id"].as_str().unwrap().to_owned(),
+                assistant["id"].as_str().unwrap().to_owned(),
+            )
+        };
+
+        let reopened = Database::open(&path).unwrap();
+        assert_eq!(
+            reopened.session(&session_id).unwrap().unwrap()["status"],
+            "interrupted"
+        );
+        assert_eq!(
+            reopened.turn(&turn_id).unwrap().unwrap()["status"],
+            "interrupted"
+        );
+        assert_eq!(
+            reopened.message(&assistant_id).unwrap().unwrap()["status"],
+            "interrupted"
+        );
+        drop(reopened);
+
+        let reopened_again = Database::open(&path).unwrap();
+        assert_eq!(
+            reopened_again.session(&session_id).unwrap().unwrap()["status"],
+            "interrupted"
+        );
+    }
+
+    #[test]
+    fn terminal_tool_update_does_not_trigger_background_reconciliation() {
+        let content = json!({
+            "structuredEvents":[
+                {"index":3,"type":"tool_result","name":"run_command","status":"RUNNING"},
+                {"index":3,"type":"tool_result","name":"run_command","status":"DONE"}
+            ]
+        });
+        assert!(!has_unresolved_running_event(&content.to_string()));
     }
 
     #[test]
