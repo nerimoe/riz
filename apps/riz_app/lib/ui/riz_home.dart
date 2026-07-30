@@ -2598,6 +2598,14 @@ class _MessageView extends ConsumerWidget {
         (message['content'] as Map?)?.cast<String, dynamic>() ??
         {'text': message['content'].toString()};
     final text = content['text']?.toString() ?? '';
+    final control = content['control'] as Map?;
+    final displayText = control?['type'] == 'task_stopped'
+        ? tr(
+            context,
+            '已手动停止后台任务\n`${control?['description'] ?? control?['taskId'] ?? ''}`',
+            'Background task stopped manually\n`${control?['description'] ?? control?['taskId'] ?? ''}`',
+          )
+        : text;
     final structured = (content['structuredEvents'] as List? ?? const [])
         .whereType<Map>()
         .map((e) => e.cast<String, dynamic>())
@@ -2641,7 +2649,7 @@ class _MessageView extends ConsumerWidget {
                 events: structured,
                 sessionId: message['sessionId']?.toString() ?? '',
               ),
-            MarkdownBody(data: text, selectable: true),
+            MarkdownBody(data: displayText, selectable: true),
             if (content['diagnostic'] != null)
               ExpansionTile(
                 tilePadding: EdgeInsets.zero,
@@ -2953,6 +2961,7 @@ class _BackgroundTaskViewState extends ConsumerState<_BackgroundTaskView> {
         .toUpperCase();
     final running = status == 'RUNNING';
     final log = task['logTail']?.toString() ?? '';
+    final mayBeWaitingForInput = task['mayBeWaitingForInput'] == true;
     final statusLabel = switch (status) {
       'RUNNING' => tr(context, '运行中', 'Running'),
       'DONE' => tr(context, '已完成', 'Completed'),
@@ -3012,6 +3021,33 @@ class _BackgroundTaskViewState extends ConsumerState<_BackgroundTaskView> {
               color: statusColor,
             ),
       children: [
+        if (mayBeWaitingForInput)
+          Padding(
+            padding: const EdgeInsets.only(bottom: 8),
+            child: Row(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Icon(
+                  Icons.input_outlined,
+                  size: 17,
+                  color: context.colors.error,
+                ),
+                const SizedBox(width: 7),
+                Expanded(
+                  child: Text(
+                    tr(
+                      context,
+                      '任务长时间没有输出，可能正在等待未写入日志的终端输入。Riz 已通知代理检查，并由代理自行调用 task 输入能力。',
+                      'The task has produced no output for a while and may be waiting for terminal input that was not logged. Riz notified the agent to inspect it and use the task input capability itself.',
+                    ),
+                    style: context.text.bodySmall?.copyWith(
+                      color: context.colors.error,
+                    ),
+                  ),
+                ),
+              ],
+            ),
+          ),
         Align(
           alignment: Alignment.centerLeft,
           child: SelectableText(

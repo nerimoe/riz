@@ -81,6 +81,7 @@ struct RunningAgent {
     pending_permission: Option<Value>,
     pending_input: Option<Value>,
     stopped_tasks: HashSet<String>,
+    attention_tasks: HashSet<String>,
     deny_steps: usize,
     permission_denied: bool,
 }
@@ -150,7 +151,7 @@ impl AgyProvider {
         write_interactive_prompt(&mut running_agent.writer, &prompt)
     }
 
-    pub fn stop_task(&self, session_id: &str, task_id: &str) -> Result<()> {
+    pub fn stop_task(&self, session_id: &str, task_id: &str) -> Result<(String, String)> {
         let agent = self
             .running
             .lock()
@@ -171,12 +172,11 @@ impl AgyProvider {
         let description = background_task_description(&conversation, task_id)?
             .context("background task description not found")?;
         terminate_task_process(root_pid, &description)?;
-        agent
-            .lock()
-            .unwrap()
-            .stopped_tasks
-            .insert(task_id.to_owned());
-        Ok(())
+        let prompt = stopped_task_prompt(task_id, &description);
+        let mut running_agent = agent.lock().unwrap();
+        running_agent.stopped_tasks.insert(task_id.to_owned());
+        write_interactive_prompt(&mut running_agent.writer, &prompt)?;
+        Ok((prompt, description))
     }
 
     pub fn respond_input(&self, session_id: &str, selected_indices: &[usize]) -> Result<()> {
@@ -407,6 +407,7 @@ impl AgentProvider for AgyProvider {
                 pending_permission: None,
                 pending_input: None,
                 stopped_tasks: HashSet::new(),
+                attention_tasks: HashSet::new(),
                 deny_steps: 1,
                 permission_denied: false,
             }));
@@ -446,6 +447,17 @@ impl AgentProvider for AgyProvider {
                                         &mut event,
                                         &running_agent.stopped_tasks,
                                     );
+                                }
+                                if let Some((task_id, prompt)) = task_attention_prompt(&event)
+                                    && conversation_accepts_steer(&path).unwrap_or(false)
+                                    && let Ok(mut running_agent) = monitor_agent.lock()
+                                    && running_agent.attention_tasks.insert(task_id)
+                                {
+                                    let _ = write_interactive_prompt(
+                                        &mut running_agent.writer,
+                                        &prompt,
+                                    );
+                                    event["task"]["attentionSent"] = json!(true);
                                 }
                                 if event["type"] == "text" {
                                     let text = event["text"].as_str().unwrap_or_default();
@@ -944,6 +956,30 @@ fn write_interactive_prompt(writer: &mut dyn Write, prompt: &str) -> Result<()> 
     Ok(())
 }
 
+fn stopped_task_prompt(task_id: &str, description: &str) -> String {
+    format!(
+        "[Riz control message] The user manually stopped background task {task_id} ({description}). Do not automatically retry or restart it. It may have been blocked while waiting for terminal input that was not visible in the task log. Briefly explain the output already available, then wait for the user's next instruction."
+    )
+}
+
+fn task_attention_prompt(event: &Value) -> Option<(String, String)> {
+    let task = event["task"].as_object()?;
+    if !task.get("mayBeWaitingForInput")?.as_bool()? {
+        return None;
+    }
+    let task_id = task.get("id")?.as_str()?.to_owned();
+    let description = task
+        .get("description")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    Some((
+        task_id.clone(),
+        format!(
+            "[Riz runtime notice] Background task {task_id} ({description}) has produced no captured output for at least 15 seconds. It may be waiting for interactive terminal input that is not visible in its task log. Inspect the task now. If input is appropriate, use manage_task send_input yourself. Do not blindly restart the task."
+        ),
+    ))
+}
+
 fn question_input(event: &Value) -> Option<Value> {
     if event["type"] != "question" && event["name"] != "ask_question" {
         return None;
@@ -1244,6 +1280,9 @@ fn background_task_details(conversation_path: &Path, content: &str, status: &str
                 .into()
         });
     let log_tail = log_path.as_deref().and_then(read_task_log_tail);
+    let may_be_waiting_for_input = status == "RUNNING"
+        && task_quiet_duration(log_path.as_deref(), started_at)
+            .is_some_and(|duration| duration >= Duration::from_secs(15));
     Some(json!({
         "id": task_id,
         "description": description,
@@ -1251,8 +1290,25 @@ fn background_task_details(conversation_path: &Path, content: &str, status: &str
         "status": status,
         "logPath": log_path,
         "logTail": log_tail,
-        "supportsInput": false,
+        "mayBeWaitingForInput": may_be_waiting_for_input,
+        "supportsInput": true,
     }))
+}
+
+fn task_quiet_duration(log_path: Option<&Path>, started_at: Option<&str>) -> Option<Duration> {
+    let modified = log_path
+        .and_then(|path| path.metadata().ok())
+        .and_then(|metadata| metadata.modified().ok())
+        .or_else(|| {
+            started_at
+                .and_then(|value| chrono::DateTime::parse_from_rfc3339(value).ok())
+                .and_then(|value| {
+                    let seconds = value.timestamp();
+                    (seconds >= 0)
+                        .then(|| SystemTime::UNIX_EPOCH + Duration::from_secs(seconds as u64))
+                })
+        })?;
+    SystemTime::now().duration_since(modified).ok()
 }
 
 fn read_task_log_tail(path: &Path) -> Option<String> {
@@ -1913,7 +1969,7 @@ Quota available
         assert_eq!(task["description"], "git clone repositories");
         assert_eq!(task["status"], "RUNNING");
         assert_eq!(task["logTail"], "cloning one\ncloning two\n");
-        assert_eq!(task["supportsInput"], false);
+        assert_eq!(task["supportsInput"], true);
 
         fs::write(&task_log, "cloning one\ncloning two\ndone\n").unwrap();
         let updated = read_structured_events(&conversation).unwrap();
@@ -1979,6 +2035,21 @@ Quota available
             bytes,
             b"\x1b[200~redirect the task\n@/tmp/reference.png\x1b[201~\r"
         );
+
+        let stopped = stopped_task_prompt("conversation/task-3", "git clone private-repo");
+        assert!(stopped.contains("user manually stopped"));
+        assert!(stopped.contains("Do not automatically retry"));
+        assert!(stopped.contains("terminal input"));
+        let attention = task_attention_prompt(&json!({
+            "task": {
+                "id": "conversation/task-3",
+                "description": "interactive command",
+                "mayBeWaitingForInput": true,
+            }
+        }))
+        .unwrap();
+        assert_eq!(attention.0, "conversation/task-3");
+        assert!(attention.1.contains("manage_task send_input yourself"));
     }
 
     #[cfg(unix)]

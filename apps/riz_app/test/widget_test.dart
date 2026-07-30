@@ -114,7 +114,8 @@ class _BackgroundTaskController extends _ResponsiveController {
                   'description': 'clone repositories',
                   'status': 'RUNNING',
                   'logTail': 'Cloning riz...\n',
-                  'supportsInput': false,
+                  'mayBeWaitingForInput': true,
+                  'supportsInput': true,
                 },
               },
             ],
@@ -778,6 +779,10 @@ void main() {
 
     expect(find.text('clone repositories'), findsOneWidget);
     expect(find.text('Cloning riz...\n'), findsOneWidget);
+    expect(
+      find.textContaining('Riz notified the agent to inspect it'),
+      findsOneWidget,
+    );
     expect(find.text('Steer the current task…'), findsOneWidget);
     expect(find.text('Steer'), findsOneWidget);
     final stop = find.byTooltip('Stop background task');

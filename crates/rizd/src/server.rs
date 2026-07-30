@@ -394,8 +394,23 @@ async fn dispatch(state: &AppState, request: &Envelope) -> Result<Value> {
         "session.task.stop" => {
             let session_id = str_param(p, "sessionId")?;
             let task_id = str_param(p, "taskId")?;
-            state.agy.stop_task(session_id, task_id)?;
-            Ok(json!({"stopped":true,"taskId":task_id}))
+            let (prompt, description) = state.agy.stop_task(session_id, task_id)?;
+            let message = state.db.add_message(
+                session_id,
+                "user",
+                json!({
+                    "text":prompt,
+                    "attachments":[],
+                    "control":{
+                        "type":"task_stopped",
+                        "taskId":task_id,
+                        "description":description,
+                    }
+                }),
+                "completed",
+            )?;
+            state.emit("message.changed", message.clone())?;
+            Ok(json!({"stopped":true,"taskId":task_id,"message":message}))
         }
         "session.permission.respond" => {
             let id = str_param(p, "sessionId")?;
