@@ -492,12 +492,11 @@ impl AgentProvider for AgyProvider {
                         {
                             monitor_completion_confirmed.store(true, Ordering::Relaxed);
                             if let Ok(mut running_agent) = monitor_agent.lock() {
-                                if has_stopped_tasks {
-                                    let _ = running_agent.killer.kill();
-                                } else {
-                                    let _ = running_agent.writer.write_all(b"\x03\x03");
-                                    let _ = running_agent.writer.flush();
-                                }
+                                // `--prompt-interactive` stays alive after a final response and
+                                // waits for another prompt. Riz owns one agy process per turn, so
+                                // explicitly reap it here; the conversation DB is already saved
+                                // and the next queued message resumes the same conversation.
+                                let _ = running_agent.killer.kill();
                             }
                             break;
                         }
