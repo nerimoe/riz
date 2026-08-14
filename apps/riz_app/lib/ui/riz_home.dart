@@ -8,6 +8,7 @@ import 'package:hooks_riverpod/hooks_riverpod.dart';
 import 'package:image_picker/image_picker.dart';
 import 'package:code_text_field/code_text_field.dart';
 import 'package:xterm/xterm.dart';
+import 'package:url_launcher/url_launcher.dart';
 
 import '../app_build.dart';
 import '../main.dart';
@@ -22,6 +23,15 @@ import 'ssh_install_dialog.dart';
 
 String tr(BuildContext context, String zh, String en) =>
     Localizations.localeOf(context).languageCode == 'zh' ? zh : en;
+
+bool _agyAuthRequired(Map<String, dynamic>? auth) =>
+    auth != null && auth['state'] != 'authenticated';
+
+Future<void> _showAgyAuthDialog(BuildContext context) => showDialog<void>(
+  context: context,
+  barrierDismissible: false,
+  builder: (_) => const _AgyAuthDialog(),
+);
 
 class RizHome extends ConsumerWidget {
   const RizHome({super.key});
@@ -571,6 +581,236 @@ class _TokenDialogState extends ConsumerState<_TokenDialog> {
       ).showSnackBar(SnackBar(content: Text(error.toString())));
       setState(() => busy = false);
     }
+  }
+}
+
+class _AgyAuthDialog extends ConsumerStatefulWidget {
+  const _AgyAuthDialog();
+
+  @override
+  ConsumerState<_AgyAuthDialog> createState() => _AgyAuthDialogState();
+}
+
+class _AgyAuthDialogState extends ConsumerState<_AgyAuthDialog> {
+  final code = TextEditingController();
+  Map<String, dynamic>? flow;
+  String? error;
+  bool openedUrl = false;
+  bool busy = true;
+
+  @override
+  void initState() {
+    super.initState();
+    Future.microtask(_start);
+  }
+
+  @override
+  void dispose() {
+    code.dispose();
+    super.dispose();
+  }
+
+  Future<void> _start() async {
+    setState(() {
+      busy = true;
+      error = null;
+      openedUrl = false;
+    });
+    try {
+      final value = await ref
+          .read(appControllerProvider.notifier)
+          .startProviderAuth();
+      if (!mounted) return;
+      setState(() => flow = value);
+      await _watch(untilCode: true);
+    } catch (value) {
+      if (mounted) setState(() => error = value.toString());
+    } finally {
+      if (mounted) setState(() => busy = false);
+    }
+  }
+
+  Future<void> _watch({required bool untilCode}) async {
+    for (var attempt = 0; mounted && attempt < 240; attempt++) {
+      final current = flow;
+      if (current == null) return;
+      final state = current['state']?.toString();
+      if (state == 'authenticated') {
+        await ref
+            .read(appControllerProvider.notifier)
+            .loadDaemonGlobals(force: true);
+        if (mounted) Navigator.pop(context);
+        return;
+      }
+      if (state == 'failed' || state == 'expired' || state == 'cancelled') {
+        if (mounted) {
+          setState(() {
+            error =
+                current['error']?.toString() ??
+                tr(context, '登录失败', 'Authentication failed');
+          });
+        }
+        return;
+      }
+      final url = current['authorizationUrl']?.toString();
+      if (url != null && url.isNotEmpty && !openedUrl) {
+        openedUrl = true;
+        final launched = await launchUrl(
+          Uri.parse(url),
+          mode: LaunchMode.externalApplication,
+        );
+        if (!launched && mounted) {
+          setState(() {
+            error = tr(
+              context,
+              '无法打开登录页面，请检查浏览器弹窗设置。',
+              'Could not open the sign-in page. Check browser popup settings.',
+            );
+          });
+        }
+      }
+      if (untilCode && state == 'waiting_code') return;
+      await Future<void>.delayed(const Duration(milliseconds: 500));
+      if (!mounted) return;
+      final sessionId = current['sessionId']?.toString();
+      if (sessionId == null) return;
+      final next = await ref
+          .read(appControllerProvider.notifier)
+          .providerAuthFlow(sessionId);
+      if (mounted) setState(() => flow = next);
+    }
+    if (mounted) {
+      setState(() {
+        error = tr(
+          context,
+          '等待 Antigravity 登录结果超时。',
+          'Timed out waiting for Antigravity authentication.',
+        );
+      });
+    }
+  }
+
+  Future<void> _submit() async {
+    final sessionId = flow?['sessionId']?.toString();
+    if (sessionId == null || code.text.trim().isEmpty) return;
+    setState(() {
+      busy = true;
+      error = null;
+    });
+    try {
+      final value = await ref
+          .read(appControllerProvider.notifier)
+          .submitProviderAuthCode(sessionId, code.text);
+      if (!mounted) return;
+      setState(() => flow = value);
+      await _watch(untilCode: false);
+    } catch (value) {
+      if (mounted) setState(() => error = value.toString());
+    } finally {
+      if (mounted) setState(() => busy = false);
+    }
+  }
+
+  Future<void> _cancel() async {
+    final sessionId = flow?['sessionId']?.toString();
+    if (sessionId != null) {
+      try {
+        await ref
+            .read(appControllerProvider.notifier)
+            .cancelProviderAuth(sessionId);
+      } catch (_) {}
+    }
+    if (mounted) Navigator.pop(context);
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final state = flow?['state']?.toString() ?? 'starting';
+    final waitingCode = state == 'waiting_code';
+    return AlertDialog(
+      title: Text(tr(context, '登录 Antigravity', 'Sign in to Antigravity')),
+      content: SizedBox(
+        width: 440,
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            if (busy && !waitingCode) ...[
+              const LinearProgressIndicator(),
+              const SizedBox(height: 16),
+            ],
+            Text(
+              waitingCode
+                  ? tr(
+                      context,
+                      '在打开的 Google 页面完成登录，然后将页面显示的授权码粘贴到这里。',
+                      'Complete sign-in on the Google page, then paste the authorization code shown there.',
+                    )
+                  : tr(
+                      context,
+                      '正在从 daemon 获取安全登录链接。',
+                      'Getting a secure sign-in link from the daemon.',
+                    ),
+            ),
+            if (waitingCode) ...[
+              const SizedBox(height: 16),
+              OutlinedButton.icon(
+                onPressed: () async {
+                  final url = flow?['authorizationUrl']?.toString();
+                  if (url != null) {
+                    await launchUrl(
+                      Uri.parse(url),
+                      mode: LaunchMode.externalApplication,
+                    );
+                  }
+                },
+                icon: const Icon(Icons.open_in_new),
+                label: Text(tr(context, '重新打开登录页面', 'Reopen sign-in page')),
+              ),
+              const SizedBox(height: 12),
+              TextField(
+                controller: code,
+                autofocus: true,
+                autocorrect: false,
+                enableSuggestions: false,
+                onChanged: (_) => setState(() {}),
+                decoration: InputDecoration(
+                  labelText: tr(context, '授权码', 'Authorization code'),
+                ),
+                onSubmitted: busy ? null : (_) => _submit(),
+              ),
+            ],
+            if (error case final message?) ...[
+              const SizedBox(height: 12),
+              Text(
+                message,
+                style: context.text.bodySmall?.copyWith(
+                  color: context.colors.error,
+                ),
+              ),
+            ],
+          ],
+        ),
+      ),
+      actions: [
+        TextButton(
+          onPressed: _cancel,
+          child: Text(tr(context, '取消', 'Cancel')),
+        ),
+        if (error != null && !waitingCode)
+          OutlinedButton.icon(
+            onPressed: busy ? null : _start,
+            icon: const Icon(Icons.refresh),
+            label: Text(tr(context, '重试', 'Retry')),
+          ),
+        if (waitingCode)
+          FilledButton.icon(
+            onPressed: busy || code.text.trim().isEmpty ? null : _submit,
+            icon: const Icon(Icons.login),
+            label: Text(tr(context, '完成登录', 'Complete sign-in')),
+          ),
+      ],
+    );
   }
 }
 
@@ -1917,6 +2157,7 @@ class _ChatViewState extends ConsumerState<_ChatView> {
       delivery = 'steer';
     }
     final globals = state.activeDaemonGlobals ?? const DaemonGlobalData();
+    final providerAuth = globals.providerAuth;
     final slashItems = [
       for (final command in globals.commands) {...command, 'kind': 'command'},
       for (final skill in globals.globalSkills) {...skill, 'kind': 'skill'},
@@ -2039,6 +2280,25 @@ class _ChatViewState extends ConsumerState<_ChatView> {
                   ),
                 ),
         ),
+        if (_agyAuthRequired(providerAuth))
+          Material(
+            color: context.colors.errorContainer,
+            child: ListTile(
+              leading: const Icon(Icons.account_circle_outlined),
+              title: Text(
+                tr(
+                  context,
+                  'Antigravity 账号需要登录',
+                  'Antigravity sign-in required',
+                ),
+              ),
+              trailing: FilledButton.icon(
+                onPressed: () => _showAgyAuthDialog(context),
+                icon: const Icon(Icons.login),
+                label: Text(tr(context, '登录', 'Sign in')),
+              ),
+            ),
+          ),
         if (state.pendingPermission case final permission?)
           Material(
             color: context.colors.tertiaryContainer,
@@ -2344,6 +2604,10 @@ class _ChatViewState extends ConsumerState<_ChatView> {
                             onPressed: sending
                                 ? null
                                 : () async {
+                                    if (_agyAuthRequired(providerAuth)) {
+                                      await _showAgyAuthDialog(context);
+                                      return;
+                                    }
                                     if (composer.text.trim().isEmpty &&
                                         attachments.isEmpty) {
                                       return;
@@ -5032,6 +5296,8 @@ class _SettingsViewState extends ConsumerState<_SettingsView> {
         _updateStatus?['currentVersion']?.toString() ?? '...';
     final available = _updateResult?['available'] == true;
     final compatible = _updateResult?['compatible'] != false;
+    final providerAuthState = state.activeDaemonGlobals?.providerAuth?['state']
+        ?.toString();
     return _PageFrame(
       title: tr(context, '设置', 'Settings'),
       child: ListView(
@@ -5170,6 +5436,32 @@ class _SettingsViewState extends ConsumerState<_SettingsView> {
               ),
             const Divider(),
           ],
+          if (active != null)
+            ListTile(
+              leading: Icon(
+                providerAuthState == 'authenticated'
+                    ? Icons.account_circle
+                    : Icons.account_circle_outlined,
+                color: providerAuthState == 'authenticated'
+                    ? context.colors.primary
+                    : context.colors.error,
+              ),
+              title: Text(tr(context, 'Antigravity 账号', 'Antigravity account')),
+              subtitle: Text(
+                providerAuthState == 'authenticated'
+                    ? tr(context, '已登录', 'Signed in')
+                    : providerAuthState == 'starting'
+                    ? tr(context, '正在检查登录状态', 'Checking sign-in status')
+                    : tr(context, '需要登录', 'Sign-in required'),
+              ),
+              trailing: providerAuthState == 'authenticated'
+                  ? const Icon(Icons.check_circle_outline)
+                  : FilledButton.icon(
+                      onPressed: () => _showAgyAuthDialog(context),
+                      icon: const Icon(Icons.login),
+                      label: Text(tr(context, '登录', 'Sign in')),
+                    ),
+            ),
           if (active != null)
             ListTile(
               leading: const Icon(Icons.dns_outlined),

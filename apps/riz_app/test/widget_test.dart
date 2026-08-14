@@ -70,6 +70,23 @@ class _QuestionController extends _ResponsiveController {
   );
 }
 
+class _AuthRequiredController extends _ResponsiveController {
+  @override
+  RizState build() => super.build().copyWith(
+    daemonGlobals: const {
+      'd1': DaemonGlobalData(
+        loaded: true,
+        providerAuth: {
+          'provider': 'agy',
+          'state': 'waiting_code',
+          'authRequired': true,
+          'sessionId': 'auth-1',
+        },
+      ),
+    },
+  );
+}
+
 class _BackgroundTaskController extends _ResponsiveController {
   final stoppedTasks = <String>[];
 
@@ -469,6 +486,23 @@ void main() {
     await tester.pump();
     expect(find.text('Send the first message'), findsOneWidget);
     expect(find.text('Default model'), findsOneWidget);
+  });
+
+  testWidgets('chat shows Antigravity sign-in when provider auth is required', (
+    tester,
+  ) async {
+    await tester.pumpWidget(
+      ProviderScope(
+        overrides: [
+          appControllerProvider.overrideWith(_AuthRequiredController.new),
+        ],
+        child: const MaterialApp(home: RizHome()),
+      ),
+    );
+    await tester.pump();
+
+    expect(find.text('Antigravity sign-in required'), findsOneWidget);
+    expect(find.widgetWithText(FilledButton, 'Sign in'), findsOneWidget);
   });
 
   testWidgets('model menu waits for models before it opens', (tester) async {

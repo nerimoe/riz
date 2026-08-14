@@ -19,9 +19,10 @@ use std::{
         Arc, Mutex,
         atomic::{AtomicBool, Ordering},
     },
-    time::{Duration, SystemTime},
+    time::{Duration, Instant, SystemTime},
 };
 use url::Url;
+use uuid::Uuid;
 
 #[derive(Clone)]
 pub struct PromptRequest {
@@ -71,6 +72,37 @@ pub trait AgentProvider: Send + Sync {
 pub struct AgyProvider {
     running: RunningAgents,
     model_cache: Arc<Mutex<Vec<Value>>>,
+    auth_sessions: AuthSessions,
+    file_auth: Arc<AtomicBool>,
+}
+
+const AUTH_FLOW_TTL: Duration = Duration::from_secs(10 * 60);
+type AuthSessions = Arc<Mutex<HashMap<String, AgyAuthSession>>>;
+
+#[derive(Clone)]
+struct AgyAuthSession {
+    writer: Arc<Mutex<Box<dyn Write + Send>>>,
+    killer: Arc<Mutex<Box<dyn ChildKiller + Send + Sync>>>,
+    state: Arc<Mutex<AgyAuthState>>,
+}
+
+struct AgyAuthState {
+    status: &'static str,
+    authorization_url: Option<String>,
+    code_submitted: bool,
+    login_selected: bool,
+    error: Option<String>,
+    transcript: String,
+    created_at: Instant,
+}
+
+impl AgyAuthState {
+    fn terminal(&self) -> bool {
+        matches!(
+            self.status,
+            "authenticated" | "failed" | "cancelled" | "expired"
+        )
+    }
 }
 
 struct RunningAgent {
@@ -129,6 +161,270 @@ impl AgyProvider {
     pub fn pending_input(&self, session_id: &str) -> Option<Value> {
         let agent = self.running.lock().ok()?.get(session_id)?.clone();
         agent.lock().ok()?.pending_input.clone()
+    }
+
+    pub async fn auth_status(&self) -> Result<Value> {
+        let provider = self.clone();
+        tokio::task::spawn_blocking(move || provider.probe_auth()).await?
+    }
+
+    pub fn start_auth(&self) -> Result<String> {
+        if let Some(session_id) = self.active_auth_session() {
+            return Ok(session_id);
+        }
+        self.auth_sessions
+            .lock()
+            .unwrap()
+            .retain(|_, session| !session.state.lock().unwrap().terminal());
+        let binary = Self::binary().context("agy is not installed")?;
+        let pair = NativePtySystem::default().openpty(PtySize {
+            rows: 50,
+            cols: 2048,
+            pixel_width: 0,
+            pixel_height: 0,
+        })?;
+        let mut command = CommandBuilder::new(binary);
+        command.env("SSH_CONNECTION", "riz-client 0 127.0.0.1 22");
+        command.env("SSH_TTY", "/dev/pts/riz-oauth");
+        command.env("TERM", "xterm-256color");
+        let mut child = pair.slave.spawn_command(command)?;
+        drop(pair.slave);
+
+        let session_id = Uuid::new_v4().to_string();
+        let state = Arc::new(Mutex::new(AgyAuthState {
+            status: "starting",
+            authorization_url: None,
+            code_submitted: false,
+            login_selected: false,
+            error: None,
+            transcript: String::new(),
+            created_at: Instant::now(),
+        }));
+        let writer = Arc::new(Mutex::new(pair.master.take_writer()?));
+        let killer = Arc::new(Mutex::new(child.clone_killer()));
+        self.auth_sessions.lock().unwrap().insert(
+            session_id.clone(),
+            AgyAuthSession {
+                writer: writer.clone(),
+                killer: killer.clone(),
+                state: state.clone(),
+            },
+        );
+
+        let mut reader = pair.master.try_clone_reader()?;
+        let reader_state = state.clone();
+        let reader_writer = writer.clone();
+        std::thread::spawn(move || {
+            let mut buffer = [0_u8; 4096];
+            while let Ok(count) = reader.read(&mut buffer) {
+                if count == 0 {
+                    break;
+                }
+                let mut auth = reader_state.lock().unwrap();
+                auth.transcript
+                    .push_str(&String::from_utf8_lossy(&buffer[..count]));
+                trim_auth_transcript(&mut auth.transcript);
+                if auth.terminal() {
+                    continue;
+                }
+                let plain = strip_terminal_sequences(&auth.transcript);
+                if !auth.login_selected && plain.contains("Select login method:") {
+                    auth.login_selected = true;
+                    drop(auth);
+                    if let Ok(mut writer) = reader_writer.lock() {
+                        let _ = writer.write_all(b"\r");
+                        let _ = writer.flush();
+                    }
+                    continue;
+                }
+                if auth.authorization_url.is_none()
+                    && let Some(url) =
+                        find_oauth_url(&auth.transcript).or_else(|| find_oauth_url(&plain))
+                {
+                    auth.authorization_url = Some(url);
+                    auth.status = "waiting_code";
+                } else if auth.authorization_url.is_some() && auth.status == "starting" {
+                    auth.status = "waiting_code";
+                }
+            }
+        });
+
+        let wait_state = state.clone();
+        std::thread::spawn(move || match child.wait() {
+            Ok(status) => {
+                let mut auth = wait_state.lock().unwrap();
+                if auth.terminal() {
+                    return;
+                }
+                let plain = strip_terminal_sequences(&auth.transcript);
+                if status.success() {
+                    auth.status = "authenticated";
+                    auth.authorization_url = None;
+                    auth.error = None;
+                } else if auth.authorization_url.is_some() && !auth.code_submitted {
+                    auth.status = "waiting_code";
+                } else {
+                    auth.status = "failed";
+                    auth.error = Some(auth_error_message(&plain));
+                }
+            }
+            Err(error) => {
+                let mut auth = wait_state.lock().unwrap();
+                if auth.terminal() {
+                    return;
+                }
+                auth.status = "failed";
+                auth.error = Some(format!("cannot wait for agy authentication: {error}"));
+            }
+        });
+
+        let expiry_state = state;
+        std::thread::spawn(move || {
+            std::thread::sleep(AUTH_FLOW_TTL);
+            let mut auth = expiry_state.lock().unwrap();
+            if auth.terminal() {
+                return;
+            }
+            auth.status = "expired";
+            auth.error = Some("authentication session expired".to_owned());
+            drop(auth);
+            let _ = killer.lock().unwrap().kill();
+        });
+        Ok(session_id)
+    }
+
+    pub fn auth_flow(&self, session_id: &str) -> Result<Value> {
+        let session = self
+            .auth_sessions
+            .lock()
+            .unwrap()
+            .get(session_id)
+            .cloned()
+            .context("authentication session not found")?;
+        let auth = session.state.lock().unwrap();
+        Ok(json!({
+            "provider": "agy",
+            "sessionId": session_id,
+            "state": auth.status,
+            "authRequired": matches!(auth.status, "waiting_code" | "verifying"),
+            "authorizationUrl": auth.authorization_url,
+            "codeSubmitted": auth.code_submitted,
+            "error": auth.error,
+        }))
+    }
+
+    pub fn submit_auth_code(&self, session_id: &str, code: &str) -> Result<Value> {
+        let code = code.trim();
+        if code.is_empty() || code.len() > 4096 || code.contains(['\r', '\n']) {
+            bail!("invalid authorization code")
+        }
+        let session = self
+            .auth_sessions
+            .lock()
+            .unwrap()
+            .get(session_id)
+            .cloned()
+            .context("authentication session not found")?;
+        {
+            let mut auth = session.state.lock().unwrap();
+            if auth.status != "waiting_code" {
+                bail!("authentication session is not waiting for a code")
+            }
+            auth.code_submitted = true;
+            auth.status = "verifying";
+        }
+        let mut writer = session.writer.lock().unwrap();
+        writer.write_all(code.as_bytes())?;
+        writer.write_all(b"\r")?;
+        writer.flush()?;
+        drop(writer);
+        let verify_state = session.state.clone();
+        let verify_killer = session.killer.clone();
+        let binary = Self::binary().context("agy is not installed")?;
+        let file_auth = self.file_auth.clone();
+        std::thread::spawn(move || {
+            for _ in 0..90 {
+                std::thread::sleep(Duration::from_secs(1));
+                if verify_state.lock().unwrap().terminal() {
+                    return;
+                }
+                if fetch_models(&binary, true).is_ok() {
+                    file_auth.store(true, Ordering::Relaxed);
+                    let mut auth = verify_state.lock().unwrap();
+                    auth.status = "authenticated";
+                    auth.authorization_url = None;
+                    auth.error = None;
+                    drop(auth);
+                    let _ = verify_killer.lock().unwrap().kill();
+                    return;
+                }
+            }
+            let mut auth = verify_state.lock().unwrap();
+            if !auth.terminal() {
+                auth.status = "failed";
+                auth.error = Some("Antigravity did not accept the authorization code".to_owned());
+                drop(auth);
+                let _ = verify_killer.lock().unwrap().kill();
+            }
+        });
+        self.auth_flow(session_id)
+    }
+
+    pub fn cancel_auth(&self, session_id: &str) -> Result<Value> {
+        let session = self
+            .auth_sessions
+            .lock()
+            .unwrap()
+            .get(session_id)
+            .cloned()
+            .context("authentication session not found")?;
+        {
+            let mut auth = session.state.lock().unwrap();
+            if !auth.terminal() {
+                auth.status = "cancelled";
+                auth.error = None;
+            }
+        }
+        let _ = session.killer.lock().unwrap().kill();
+        self.auth_flow(session_id)
+    }
+
+    fn active_auth_session(&self) -> Option<String> {
+        self.auth_sessions
+            .lock()
+            .ok()?
+            .iter()
+            .find_map(|(id, session)| {
+                let state = session.state.lock().ok()?;
+                (!state.terminal() && state.created_at.elapsed() < AUTH_FLOW_TTL)
+                    .then(|| id.clone())
+            })
+    }
+
+    fn probe_auth(&self) -> Result<Value> {
+        let binary = Self::binary().context("agy is not installed")?;
+        let mut failures = Vec::new();
+        for file_auth in [false, true] {
+            match fetch_models(&binary, file_auth) {
+                Ok(models) => {
+                    self.file_auth.store(file_auth, Ordering::Relaxed);
+                    *self.model_cache.lock().unwrap() = models;
+                    return Ok(json!({
+                        "provider": "agy",
+                        "state": "authenticated",
+                        "authRequired": false,
+                        "credentialStore": if file_auth { "file" } else { "keyring" },
+                    }));
+                }
+                Err(error) => failures.push(error.to_string()),
+            }
+        }
+        Ok(json!({
+            "provider": "agy",
+            "state": "auth_required",
+            "authRequired": true,
+            "error": failures.into_iter().next(),
+        }))
     }
 
     pub fn steer(&self, session_id: &str, prompt: &str, attachments: &[PathBuf]) -> Result<()> {
@@ -283,22 +579,14 @@ impl AgentProvider for AgyProvider {
         let binary = Self::binary().context("agy is not installed")?;
         let mut last_error = None;
         for _ in 0..2 {
-            match Command::new(&binary).arg("models").output() {
-                Ok(output) if output.status.success() => {
-                    let models = parse_models(&String::from_utf8_lossy(&output.stdout));
-                    if !models.is_empty() {
-                        *self.model_cache.lock().unwrap() = models.clone();
-                        return Ok(models);
-                    }
-                    last_error = Some("agy models returned no models".to_owned());
+            match fetch_models(&binary, self.file_auth.load(Ordering::Relaxed)) {
+                Ok(models) => {
+                    *self.model_cache.lock().unwrap() = models.clone();
+                    return Ok(models);
                 }
-                Ok(output) => {
-                    last_error = Some(format!(
-                        "agy models failed: {}",
-                        String::from_utf8_lossy(&output.stderr).trim()
-                    ));
+                Err(error) => {
+                    last_error = Some(error.to_string());
                 }
-                Err(error) => last_error = Some(format!("cannot run agy models: {error}")),
             }
         }
         let cached = self.model_cache.lock().unwrap().clone();
@@ -357,6 +645,7 @@ impl AgentProvider for AgyProvider {
         let command_project_id = requested_project_id.clone();
         let creating_project = command_project_id.is_none();
         let expected_cwd = request.cwd.clone();
+        let file_auth = self.file_auth.load(Ordering::Relaxed);
         let result = tokio::task::spawn_blocking(move || {
             let pair = NativePtySystem::default().openpty(PtySize {
                 rows: 40,
@@ -365,6 +654,7 @@ impl AgentProvider for AgyProvider {
                 pixel_height: 0,
             })?;
             let mut cmd = CommandBuilder::new(bin);
+            apply_file_auth_pty(&mut cmd, file_auth);
             if let Some(id) = command_project_id.as_deref() {
                 cmd.arg("--project");
                 cmd.arg(id);
@@ -652,7 +942,8 @@ impl AgentProvider for AgyProvider {
         Ok(())
     }
     async fn quota(&self) -> Result<Value> {
-        tokio::task::spawn_blocking(quota_via_pty).await?
+        let file_auth = self.file_auth.load(Ordering::Relaxed);
+        tokio::task::spawn_blocking(move || quota_via_pty(file_auth)).await?
     }
 }
 
@@ -752,6 +1043,39 @@ fn parse_models(output: &str) -> Vec<Value> {
         .filter(|line| !line.is_empty())
         .map(|model| json!({"id": model, "name": model}))
         .collect()
+}
+
+fn fetch_models(binary: &Path, file_auth: bool) -> Result<Vec<Value>> {
+    let mut command = Command::new(binary);
+    command.arg("models");
+    if file_auth {
+        apply_file_auth_command(&mut command);
+    }
+    let output = command.output().context("cannot run agy models")?;
+    if !output.status.success() {
+        let error = [output.stdout.as_slice(), output.stderr.as_slice()].concat();
+        bail!(
+            "agy models failed: {}",
+            strip_terminal_sequences(&String::from_utf8_lossy(&error)).trim()
+        )
+    }
+    let models = parse_models(&String::from_utf8_lossy(&output.stdout));
+    if models.is_empty() {
+        bail!("agy models returned no models")
+    }
+    Ok(models)
+}
+
+fn apply_file_auth_command(command: &mut Command) {
+    command.env("SSH_CONNECTION", "riz-client 0 127.0.0.1 22");
+    command.env("SSH_TTY", "/dev/pts/riz-oauth");
+}
+
+fn apply_file_auth_pty(command: &mut CommandBuilder, file_auth: bool) {
+    if file_auth {
+        command.env("SSH_CONNECTION", "riz-client 0 127.0.0.1 22");
+        command.env("SSH_TTY", "/dev/pts/riz-oauth");
+    }
 }
 
 #[derive(Default)]
@@ -1056,7 +1380,7 @@ fn extract_strings(bytes: &[u8]) -> Vec<String> {
     out
 }
 
-fn quota_via_pty() -> Result<Value> {
+fn quota_via_pty(file_auth: bool) -> Result<Value> {
     let bin = AgyProvider::binary().context("agy is not installed")?;
     let pair = NativePtySystem::default().openpty(PtySize {
         rows: 50,
@@ -1065,6 +1389,7 @@ fn quota_via_pty() -> Result<Value> {
         pixel_height: 0,
     })?;
     let mut cmd = CommandBuilder::new(bin);
+    apply_file_auth_pty(&mut cmd, file_auth);
     cmd.arg("--sandbox");
     let mut child = pair.slave.spawn_command(cmd)?;
     drop(pair.slave);
@@ -1660,6 +1985,65 @@ fn strip_ansi(s: &str) -> String {
         .replace('\r', "")
 }
 
+fn strip_terminal_sequences(s: &str) -> String {
+    let without_osc = regex::Regex::new(r"\x1b\][^\x07]*(?:\x07|\x1b\\)")
+        .unwrap()
+        .replace_all(s, "");
+    strip_ansi(&without_osc)
+}
+
+fn trim_auth_transcript(transcript: &mut String) {
+    const MAX_BYTES: usize = 256 * 1024;
+    if transcript.len() <= MAX_BYTES {
+        return;
+    }
+    let mut start = transcript.len() - MAX_BYTES;
+    while !transcript.is_char_boundary(start) {
+        start += 1;
+    }
+    transcript.drain(..start);
+}
+
+fn find_oauth_url(output: &str) -> Option<String> {
+    let candidates = regex::Regex::new(r#"https://[^\s\x00-\x1f<>\"']+"#).ok()?;
+    candidates
+        .find_iter(output)
+        .filter_map(|value| {
+            let raw = value
+                .as_str()
+                .trim_end_matches(|character: char| ".,;:)]}".contains(character));
+            let parsed = Url::parse(raw).ok()?;
+            let host = parsed.host_str().unwrap_or_default();
+            let looks_like_oauth = host == "accounts.google.com"
+                || parsed.path().to_ascii_lowercase().contains("oauth")
+                || parsed.query_pairs().any(|(key, _)| {
+                    matches!(key.as_ref(), "client_id" | "redirect_uri" | "response_type")
+                });
+            looks_like_oauth.then(|| raw.to_owned())
+        })
+        .next()
+}
+
+fn auth_error_message(output: &str) -> String {
+    let lower = output.to_ascii_lowercase();
+    if lower.contains("not logged into antigravity")
+        || lower.contains("authorization code")
+        || lower.contains("sign in")
+    {
+        "Antigravity authentication was not completed".to_owned()
+    } else {
+        output
+            .lines()
+            .rev()
+            .map(str::trim)
+            .find(|line| !line.is_empty())
+            .unwrap_or("agy authentication failed")
+            .chars()
+            .take(500)
+            .collect()
+    }
+}
+
 fn permission_prompt(output: &str) -> Option<(String, usize)> {
     let marker = output.rfind("1. Yes")?;
     let question = output[..marker]
@@ -1682,6 +2066,28 @@ mod tests {
     fn extracts_nested_utf8() {
         let data = [0x0a, 0x05, b'h', b'e', b'l', b'l', b'o'];
         assert!(extract_strings(&data).contains(&"hello".into()));
+    }
+    #[test]
+    fn extracts_google_oauth_url_from_terminal_output() {
+        let url = "https://accounts.google.com/o/oauth2/v2/auth?client_id=test&redirect_uri=http%3A%2F%2Flocalhost";
+        let output = format!("\x1b[32mOpen this URL:\x1b[0m {url}\r\nAuthorization code:");
+        assert_eq!(
+            find_oauth_url(&strip_terminal_sequences(&output)).as_deref(),
+            Some(url)
+        );
+    }
+    #[test]
+    fn extracts_oauth_url_from_an_osc_hyperlink() {
+        let url = "https://accounts.google.com/o/oauth2/auth?client_id=test&state=one";
+        let output = format!("\x1b]8;id=auth;{url}\x07Sign in\x1b]8;;\x07");
+        assert_eq!(find_oauth_url(&output).as_deref(), Some(url));
+    }
+    #[test]
+    fn ignores_non_oauth_links() {
+        assert_eq!(
+            find_oauth_url("Terms: https://antigravity.google/terms"),
+            None
+        );
     }
 
     #[test]

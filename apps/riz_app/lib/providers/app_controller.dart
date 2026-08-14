@@ -123,9 +123,20 @@ class AppController extends Notifier<RizState> {
       previous.copyWith(loading: true, clearError: true),
     );
 
+    Map<String, dynamic>? providerAuth;
+    Object? authError;
+    try {
+      final response = await daemon.request('provider.auth.status');
+      providerAuth = (response['auth'] as Map? ?? const {})
+          .cast<String, dynamic>();
+    } catch (error) {
+      authError = error;
+    }
+    if (_clients[connectionId] != daemon) return;
+    final authenticated = providerAuth?['state'] == 'authenticated';
     final results = await Future.wait([
       _loadGlobalList(daemon, 'provider.list', 'providers'),
-      _loadGlobalList(daemon, 'provider.models', 'models'),
+      if (authenticated) _loadGlobalList(daemon, 'provider.models', 'models'),
       _loadGlobalList(daemon, 'provider.commands', 'commands'),
       _loadGlobalList(daemon, 'skill.list', 'skills'),
     ]);
@@ -135,7 +146,7 @@ class AppController extends Notifier<RizState> {
     List<Map<String, dynamic>>? providers;
     List<Map<String, dynamic>>? commands;
     List<Map<String, dynamic>>? skills;
-    final errors = <String>[];
+    final errors = <String>[if (authError != null) 'provider.auth: $authError'];
     for (final result in results) {
       if (result.error != null) {
         errors.add('${result.key}: ${result.error}');
@@ -159,6 +170,7 @@ class AppController extends Notifier<RizState> {
         loaded: errors.isEmpty,
         models: models,
         providers: providers,
+        providerAuth: providerAuth,
         commands: commands,
         globalSkills: skills,
         error: errors.isEmpty ? null : errors.join('\n'),
@@ -188,6 +200,33 @@ class AppController extends Notifier<RizState> {
     state = state.copyWith(
       daemonGlobals: {...state.daemonGlobals, connectionId: data},
     );
+  }
+
+  Future<Map<String, dynamic>> startProviderAuth() async {
+    final response = await request('provider.auth.start');
+    return (response['auth'] as Map).cast<String, dynamic>();
+  }
+
+  Future<Map<String, dynamic>> providerAuthFlow(String sessionId) async {
+    final response = await request('provider.auth.flow', {
+      'sessionId': sessionId,
+    });
+    return (response['auth'] as Map).cast<String, dynamic>();
+  }
+
+  Future<Map<String, dynamic>> submitProviderAuthCode(
+    String sessionId,
+    String code,
+  ) async {
+    final response = await request('provider.auth.submit', {
+      'sessionId': sessionId,
+      'code': code,
+    });
+    return (response['auth'] as Map).cast<String, dynamic>();
+  }
+
+  Future<void> cancelProviderAuth(String sessionId) async {
+    await request('provider.auth.cancel', {'sessionId': sessionId});
   }
 
   Future<void> _connectOne(DaemonConnection connection) async {

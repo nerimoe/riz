@@ -515,6 +515,23 @@ async fn dispatch(state: &AppState, request: &Envelope) -> Result<Value> {
         "provider.commands" => Ok(json!({"commands":state.agy.commands()})),
         "provider.list" => Ok(json!({"providers":[state.agy.detect()]})),
         "provider.models" => Ok(json!({"models":state.agy.models()?})),
+        "provider.auth.status" => Ok(json!({"auth":state.agy.auth_status().await?})),
+        "provider.auth.start" => {
+            let session_id = state.agy.start_auth()?;
+            Ok(json!({"auth":state.agy.auth_flow(&session_id)?}))
+        }
+        "provider.auth.flow" => Ok(json!({
+            "auth":state.agy.auth_flow(str_param(p, "sessionId")?)?
+        })),
+        "provider.auth.submit" => Ok(json!({
+            "auth":state.agy.submit_auth_code(
+                str_param(p, "sessionId")?,
+                str_param(p, "code")?,
+            )?
+        })),
+        "provider.auth.cancel" => Ok(json!({
+            "auth":state.agy.cancel_auth(str_param(p, "sessionId")?)?
+        })),
         "fs.list" => files::list(
             &files::path_from(p, "path")?,
             p["offset"].as_u64().unwrap_or(0) as usize,
