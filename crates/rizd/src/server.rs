@@ -31,6 +31,8 @@ use tokio::sync::broadcast;
 use tower_http::{cors::CorsLayer, trace::TraceLayer};
 use uuid::Uuid;
 
+const MAX_INITIAL_EVENT_REPLAY: usize = 50;
+
 pub async fn serve(state: AppState) -> Result<()> {
     let listen = state.config.listen;
     if !listen.ip().is_loopback() {
@@ -112,8 +114,10 @@ async fn client_inner(mut socket: WebSocket, state: AppState) -> Result<()> {
         .send(Message::Text(serde_json::to_string(&hello)?.into()))
         .await?;
     tracing::info!(client_trace_id, "websocket hello sent");
-    let events = state.db.events_after(last_seq, 1001)?;
-    if events.len() > 1000 {
+    let events = state
+        .db
+        .events_after(last_seq, (MAX_INITIAL_EVENT_REPLAY + 1) as i64)?;
+    if events.len() > MAX_INITIAL_EVENT_REPLAY {
         let snapshot = wire_event(
             state.daemon_id(),
             state.db.last_seq()?,
@@ -1276,7 +1280,9 @@ fn terminal_frame(id: Uuid, data: &[u8]) -> Vec<u8> {
 
 #[cfg(test)]
 mod tests {
-    use super::{quota_markdown, router, session_title, upsert_runtime_event};
+    use super::{
+        MAX_INITIAL_EVENT_REPLAY, quota_markdown, router, session_title, upsert_runtime_event,
+    };
     use crate::{
         config::{Config, hash_token},
         db::Database,
@@ -1416,13 +1422,14 @@ mod tests {
         assert_eq!(second.seq, Some(2));
         small_server.abort();
 
-        let (_large_directory, large_url, large_server) = test_server(1001).await;
+        let event_count = MAX_INITIAL_EVENT_REPLAY + 1;
+        let (_large_directory, large_url, large_server) = test_server(event_count).await;
         let (mut large_client, _) = connect_async(large_url).await.unwrap();
         large_client.send(auth("secret", 0)).await.unwrap();
         assert_eq!(receive(&mut large_client).await.payload["kind"], "hello");
         let snapshot = receive(&mut large_client).await;
         assert_eq!(snapshot.payload["topic"], "snapshot");
-        assert_eq!(snapshot.seq, Some(1001));
+        assert_eq!(snapshot.seq, Some(event_count as i64));
         assert!(snapshot.payload["data"]["sessions"].is_array());
         large_server.abort();
     }

@@ -9,12 +9,14 @@ use portable_pty::{ChildKiller, CommandBuilder, NativePtySystem, PtySize, PtySys
 use riz_protocol::ProviderCapabilities;
 use rusqlite::Connection;
 use serde_json::{Value, json};
+#[cfg(unix)]
+use std::os::unix::process::CommandExt;
 use std::{
     collections::{HashMap, HashSet},
     fs,
     io::{Read, Write},
     path::{Path, PathBuf},
-    process::Command,
+    process::{Command, Output, Stdio},
     sync::{
         Arc, Mutex,
         atomic::{AtomicBool, Ordering},
@@ -72,12 +74,23 @@ pub trait AgentProvider: Send + Sync {
 pub struct AgyProvider {
     running: RunningAgents,
     model_cache: Arc<Mutex<Vec<Value>>>,
+    detection_cache: Arc<Mutex<Option<Value>>>,
     auth_sessions: AuthSessions,
+    auth_cache: Arc<Mutex<Option<CachedAuth>>>,
+    auth_probe: Arc<Mutex<()>>,
     file_auth: Arc<AtomicBool>,
 }
 
 const AUTH_FLOW_TTL: Duration = Duration::from_secs(10 * 60);
+const AUTH_CACHE_TTL: Duration = Duration::from_secs(30);
+const AGY_MODELS_TIMEOUT: Duration = Duration::from_secs(12);
+const AGY_VERSION_TIMEOUT: Duration = Duration::from_secs(3);
 type AuthSessions = Arc<Mutex<HashMap<String, AgyAuthSession>>>;
+
+struct CachedAuth {
+    checked_at: Instant,
+    value: Value,
+}
 
 #[derive(Clone)]
 struct AgyAuthSession {
@@ -210,6 +223,8 @@ impl AgyProvider {
                 state: state.clone(),
             },
         );
+        *self.auth_cache.lock().unwrap() = None;
+        self.model_cache.lock().unwrap().clear();
 
         let mut reader = pair.master.try_clone_reader()?;
         let reader_state = state.clone();
@@ -342,14 +357,26 @@ impl AgyProvider {
         let verify_killer = session.killer.clone();
         let binary = Self::binary().context("agy is not installed")?;
         let file_auth = self.file_auth.clone();
+        let model_cache = self.model_cache.clone();
+        let auth_cache = self.auth_cache.clone();
         std::thread::spawn(move || {
             for _ in 0..90 {
                 std::thread::sleep(Duration::from_secs(1));
                 if verify_state.lock().unwrap().terminal() {
                     return;
                 }
-                if fetch_models(&binary, true).is_ok() {
+                if let Ok(models) = fetch_models(&binary, true) {
                     file_auth.store(true, Ordering::Relaxed);
+                    *model_cache.lock().unwrap() = models;
+                    *auth_cache.lock().unwrap() = Some(CachedAuth {
+                        checked_at: Instant::now(),
+                        value: json!({
+                            "provider": "agy",
+                            "state": "authenticated",
+                            "authRequired": false,
+                            "credentialStore": "file",
+                        }),
+                    });
                     let mut auth = verify_state.lock().unwrap();
                     auth.status = "authenticated";
                     auth.authorization_url = None;
@@ -402,6 +429,13 @@ impl AgyProvider {
     }
 
     fn probe_auth(&self) -> Result<Value> {
+        if let Some(value) = self.cached_auth() {
+            return Ok(value);
+        }
+        let _probe = self.auth_probe.lock().unwrap();
+        if let Some(value) = self.cached_auth() {
+            return Ok(value);
+        }
         let binary = Self::binary().context("agy is not installed")?;
         let mut failures = Vec::new();
         for file_auth in [false, true] {
@@ -409,22 +443,39 @@ impl AgyProvider {
                 Ok(models) => {
                     self.file_auth.store(file_auth, Ordering::Relaxed);
                     *self.model_cache.lock().unwrap() = models;
-                    return Ok(json!({
+                    return Ok(self.cache_auth(json!({
                         "provider": "agy",
                         "state": "authenticated",
                         "authRequired": false,
                         "credentialStore": if file_auth { "file" } else { "keyring" },
-                    }));
+                    })));
                 }
                 Err(error) => failures.push(error.to_string()),
             }
         }
-        Ok(json!({
+        Ok(self.cache_auth(json!({
             "provider": "agy",
             "state": "auth_required",
             "authRequired": true,
             "error": failures.into_iter().next(),
-        }))
+        })))
+    }
+
+    fn cached_auth(&self) -> Option<Value> {
+        self.auth_cache
+            .lock()
+            .unwrap()
+            .as_ref()
+            .filter(|cached| cached.checked_at.elapsed() < AUTH_CACHE_TTL)
+            .map(|cached| cached.value.clone())
+    }
+
+    fn cache_auth(&self, value: Value) -> Value {
+        *self.auth_cache.lock().unwrap() = Some(CachedAuth {
+            checked_at: Instant::now(),
+            value: value.clone(),
+        });
+        value
     }
 
     pub fn steer(&self, session_id: &str, prompt: &str, attachments: &[PathBuf]) -> Result<()> {
@@ -564,18 +615,32 @@ impl AgentProvider for AgyProvider {
         }
     }
     fn detect(&self) -> Value {
+        let mut cache = self.detection_cache.lock().unwrap();
+        if let Some(value) = cache.as_ref() {
+            return value.clone();
+        }
         let bin = Self::binary();
         let version = bin
             .as_ref()
-            .and_then(|b| Command::new(b).arg("--version").output().ok())
+            .and_then(|binary| {
+                let mut command = Command::new(binary);
+                command.arg("--version");
+                command_output_with_timeout(&mut command, AGY_VERSION_TIMEOUT).ok()
+            })
             .filter(|o| o.status.success())
             .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_owned());
-        json!({"id":self.id(),"installed":bin.is_some(),"path":bin,"version":version,"capabilities":self.capabilities(),"termsWarning":true})
+        let value = json!({"id":self.id(),"installed":bin.is_some(),"path":bin,"version":version,"capabilities":self.capabilities(),"termsWarning":true});
+        *cache = Some(value.clone());
+        value
     }
     fn commands(&self) -> Vec<Value> {
         vec![json!({"name":"/usage","description":"Show quota usage"})]
     }
     fn models(&self) -> Result<Vec<Value>> {
+        let cached = self.model_cache.lock().unwrap().clone();
+        if !cached.is_empty() {
+            return Ok(cached);
+        }
         let binary = Self::binary().context("agy is not installed")?;
         let mut last_error = None;
         for _ in 0..2 {
@@ -1045,13 +1110,63 @@ fn parse_models(output: &str) -> Vec<Value> {
         .collect()
 }
 
+fn command_output_with_timeout(command: &mut Command, timeout: Duration) -> Result<Output> {
+    command.stdout(Stdio::piped()).stderr(Stdio::piped());
+    #[cfg(unix)]
+    command.process_group(0);
+    let mut child = command.spawn().context("cannot start command")?;
+    let mut stdout = child.stdout.take().context("cannot capture stdout")?;
+    let mut stderr = child.stderr.take().context("cannot capture stderr")?;
+    let stdout_reader = std::thread::spawn(move || {
+        let mut output = Vec::new();
+        stdout.read_to_end(&mut output)?;
+        Ok::<_, std::io::Error>(output)
+    });
+    let stderr_reader = std::thread::spawn(move || {
+        let mut output = Vec::new();
+        stderr.read_to_end(&mut output)?;
+        Ok::<_, std::io::Error>(output)
+    });
+    let started = Instant::now();
+    let mut timed_out = false;
+    let status = loop {
+        if let Some(status) = child.try_wait()? {
+            break status;
+        }
+        if started.elapsed() >= timeout {
+            timed_out = true;
+            #[cfg(unix)]
+            let _ = killpg(Pid::from_raw(child.id() as i32), Signal::SIGKILL);
+            #[cfg(not(unix))]
+            let _ = child.kill();
+            break child.wait()?;
+        }
+        std::thread::sleep(Duration::from_millis(25));
+    };
+    let stdout = stdout_reader
+        .join()
+        .map_err(|_| anyhow::anyhow!("stdout reader thread panicked"))??;
+    let stderr = stderr_reader
+        .join()
+        .map_err(|_| anyhow::anyhow!("stderr reader thread panicked"))??;
+    if timed_out {
+        bail!("command timed out after {} seconds", timeout.as_secs())
+    }
+    Ok(Output {
+        status,
+        stdout,
+        stderr,
+    })
+}
+
 fn fetch_models(binary: &Path, file_auth: bool) -> Result<Vec<Value>> {
     let mut command = Command::new(binary);
     command.arg("models");
     if file_auth {
         apply_file_auth_command(&mut command);
     }
-    let output = command.output().context("cannot run agy models")?;
+    let output = command_output_with_timeout(&mut command, AGY_MODELS_TIMEOUT)
+        .context("cannot run agy models")?;
     if !output.status.success() {
         let error = [output.stdout.as_slice(), output.stderr.as_slice()].concat();
         bail!(
@@ -2088,6 +2203,27 @@ mod tests {
             find_oauth_url("Terms: https://antigravity.google/terms"),
             None
         );
+    }
+
+    #[test]
+    fn command_output_captures_stdout() {
+        let mut command = Command::new("/bin/sh");
+        command.args(["-c", "printf ready"]);
+        let output = command_output_with_timeout(&mut command, Duration::from_secs(1)).unwrap();
+        assert!(output.status.success());
+        assert_eq!(output.stdout, b"ready");
+    }
+
+    #[test]
+    fn command_output_kills_a_timed_out_process_group() {
+        let mut command = Command::new("/bin/sh");
+        command.args(["-c", "sleep 5"]);
+        let started = Instant::now();
+        let error = command_output_with_timeout(&mut command, Duration::from_millis(50))
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("timed out"));
+        assert!(started.elapsed() < Duration::from_secs(1));
     }
 
     #[test]

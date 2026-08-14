@@ -171,6 +171,58 @@ describe("RelayRoom", () => {
     expect((await daemonClosed).code).toBe(1012);
   });
 
+  it("reclaims authenticated clients that stop sending heartbeats", async () => {
+    const roomName = crypto.randomUUID();
+    const room = env.RELAY_ROOMS.getByName(roomName);
+    const daemon = await connect(roomName, "daemon");
+    const paired = nextMessage(daemon);
+    const client = await connect(roomName, "client");
+    expect((await paired).data).toBe(pairedMarker);
+
+    const forwarded = nextMessage(daemon);
+    client.send("auth frame");
+    expect((await forwarded).data).toBe("auth frame");
+    await runInDurableObject(room, (_instance, state) => {
+      const socket = state.getWebSockets("client")[0];
+      const attachment = socket.deserializeAttachment() as Record<
+        string,
+        unknown
+      >;
+      socket.serializeAttachment({ ...attachment, lastSeenAt: 0 });
+    });
+
+    const clientClosed = new Promise<CloseEvent>((resolve) =>
+      client.addEventListener("close", resolve, { once: true }),
+    );
+    const daemonClosed = new Promise<CloseEvent>((resolve) =>
+      daemon.addEventListener("close", resolve, { once: true }),
+    );
+    expect(await runDurableObjectAlarm(room)).toBe(true);
+    expect((await clientClosed).code).toBe(1001);
+    expect((await daemonClosed).code).toBe(1012);
+  });
+
+  it("keeps authenticated clients with recent heartbeat activity", async () => {
+    const roomName = crypto.randomUUID();
+    const room = env.RELAY_ROOMS.getByName(roomName);
+    const daemon = await connect(roomName, "daemon");
+    const paired = nextMessage(daemon);
+    const client = await connect(roomName, "client");
+    expect((await paired).data).toBe(pairedMarker);
+
+    const forwarded = nextMessage(daemon);
+    client.send("heartbeat");
+    expect((await forwarded).data).toBe("heartbeat");
+    expect(await runDurableObjectAlarm(room)).toBe(true);
+    await runInDurableObject(room, (_instance, state) => {
+      expect(state.getWebSockets("client")).toHaveLength(1);
+      expect(state.getWebSockets("daemon")).toHaveLength(1);
+    });
+
+    daemon.close(1000, "done");
+    client.close(1000, "done");
+  });
+
   it("reclaims daemon sockets whose client peer no longer exists", async () => {
     const roomName = crypto.randomUUID();
     const room = env.RELAY_ROOMS.getByName(roomName);
