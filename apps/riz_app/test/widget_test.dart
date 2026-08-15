@@ -148,6 +148,33 @@ class _BackgroundTaskController extends _ResponsiveController {
   }
 }
 
+class _ManyActivitiesController extends _ResponsiveController {
+  @override
+  RizState build() => super.build().copyWith(
+    messages: [
+      {
+        'id': 'many-activities-message',
+        'sessionId': 's1',
+        'role': 'assistant',
+        'status': 'running',
+        'content': {
+          'text': '',
+          'structuredEvents': [
+            for (var index = 0; index < 60; index++)
+              {
+                'index': index,
+                'type': index.isEven ? 'tool_call' : 'tool_result',
+                'name': 'run_command',
+                'status': index < 59 ? 'DONE' : 'RUNNING',
+                'text': 'activity $index',
+              },
+          ],
+        },
+      },
+    ],
+  );
+}
+
 class _EmptyProjectController extends AppController {
   @override
   RizState build() => const RizState(
@@ -826,6 +853,28 @@ void main() {
     expect(controller.stoppedTasks, [
       's1:00000000-0000-0000-0000-000000000003/task-3',
     ]);
+    expect(tester.takeException(), isNull);
+  });
+
+  testWidgets('long activity streams stay renderable on a phone', (
+    tester,
+  ) async {
+    tester.view.devicePixelRatio = 1;
+    tester.view.physicalSize = const Size(390, 844);
+    addTearDown(tester.view.resetDevicePixelRatio);
+    addTearDown(tester.view.resetPhysicalSize);
+
+    await tester.pumpWidget(
+      ProviderScope(
+        overrides: [
+          appControllerProvider.overrideWith(_ManyActivitiesController.new),
+        ],
+        child: const MaterialApp(home: RizHome()),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    expect(find.textContaining('60'), findsOneWidget);
     expect(tester.takeException(), isNull);
   });
 }

@@ -24,6 +24,17 @@ import 'ssh_install_dialog.dart';
 String tr(BuildContext context, String zh, String en) =>
     Localizations.localeOf(context).languageCode == 'zh' ? zh : en;
 
+Map<String, dynamic> _stringMap(dynamic value) {
+  if (value is! Map) return const <String, dynamic>{};
+  return {
+    for (final entry in value.entries)
+      if (entry.key is String) entry.key as String: entry.value,
+  };
+}
+
+List<dynamic> _valueList(dynamic value) =>
+    value is List ? value : const <dynamic>[];
+
 bool _agyAuthRequired(Map<String, dynamic>? auth) =>
     auth != null && auth['state'] != 'authenticated';
 
@@ -2186,13 +2197,13 @@ class _ChatViewState extends ConsumerState<_ChatView> {
     final provider = globals.providers
         .where((item) => item['id'] == providerId)
         .firstOrNull;
-    final providerCapabilities = provider?['capabilities'] as Map?;
-    final providerSupportsSteering = providerCapabilities?['steering'] == true;
+    final providerCapabilities = _stringMap(provider?['capabilities']);
+    final providerSupportsSteering = providerCapabilities['steering'] == true;
     final hasWaitingBackgroundTask = state.messages.any((message) {
       if (message['role'] != 'assistant') return false;
-      final content = message['content'] as Map?;
-      if ((content?['text']?.toString().trim() ?? '').isEmpty) return false;
-      return (content?['structuredEvents'] as List? ?? const []).any((event) {
+      final content = _stringMap(message['content']);
+      if ((content['text']?.toString().trim() ?? '').isEmpty) return false;
+      return _valueList(content['structuredEvents']).any((event) {
         if (event is! Map || event['task'] is! Map) return false;
         final task = event['task'] as Map;
         return (task['status'] ?? event['status'])?.toString().toUpperCase() ==
@@ -2858,21 +2869,21 @@ class _MessageView extends ConsumerWidget {
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final user = message['role'] == 'user';
-    final content =
-        (message['content'] as Map?)?.cast<String, dynamic>() ??
-        {'text': message['content'].toString()};
+    final content = message['content'] is Map
+        ? _stringMap(message['content'])
+        : {'text': message['content']?.toString() ?? ''};
     final text = content['text']?.toString() ?? '';
-    final control = content['control'] as Map?;
-    final displayText = control?['type'] == 'task_stopped'
+    final control = _stringMap(content['control']);
+    final displayText = control['type'] == 'task_stopped'
         ? tr(
             context,
-            '已手动停止后台任务\n`${control?['description'] ?? control?['taskId'] ?? ''}`',
-            'Background task stopped manually\n`${control?['description'] ?? control?['taskId'] ?? ''}`',
+            '已手动停止后台任务\n`${control['description'] ?? control['taskId'] ?? ''}`',
+            'Background task stopped manually\n`${control['description'] ?? control['taskId'] ?? ''}`',
           )
         : text;
-    final structured = (content['structuredEvents'] as List? ?? const [])
+    final structured = _valueList(content['structuredEvents'])
         .whereType<Map>()
-        .map((e) => e.cast<String, dynamic>())
+        .map(_stringMap)
         .where((e) => !const {'user', 'text', 'title'}.contains(e['type']))
         .toList();
     return Align(
@@ -2902,12 +2913,10 @@ class _MessageView extends ConsumerWidget {
               const SizedBox(height: 6),
             ],
             if (user)
-              for (final attachment
-                  in (content['attachments'] as List? ?? const [])
-                      .whereType<Map>())
-                _RemoteImageAttachment(
-                  attachment: attachment.cast<String, dynamic>(),
-                ),
+              for (final attachment in _valueList(
+                content['attachments'],
+              ).whereType<Map>())
+                _RemoteImageAttachment(attachment: _stringMap(attachment)),
             if (structured.isNotEmpty)
               _AgentActivityView(
                 events: structured,
@@ -3077,8 +3086,13 @@ class _AgentActivityView extends StatelessWidget {
   final List<Map<String, dynamic>> events;
   final String sessionId;
 
+  static const _maxRenderedEvents = 24;
+
   @override
   Widget build(BuildContext context) {
+    final renderedEvents = events.length <= _maxRenderedEvents
+        ? events
+        : events.sublist(events.length - _maxRenderedEvents);
     final hasRunningTask = events.any((event) {
       final task = event['task'];
       return task is Map &&
@@ -3114,7 +3128,7 @@ class _AgentActivityView extends StatelessWidget {
                 style: context.text.labelSmall,
               ),
         children: [
-          for (final event in events)
+          for (final event in renderedEvents)
             _StructuredEventView(event: event, sessionId: sessionId),
         ],
       ),

@@ -329,29 +329,33 @@ class AppController extends Notifier<RizState> {
   }
 
   void _event(String connectionId, String topic, dynamic data) {
-    if (topic == 'snapshot' && data is Map) {
-      for (final cache
-          in _sessionCaches[connectionId]?.values ??
-              const <_SessionMemoryCache>[]) {
-        cache.dirty = true;
-      }
-      if (connectionId == state.activeConnectionId) {
-        final snapshot = data.cast<String, dynamic>();
-        state = state.copyWith(snapshot: snapshot);
-        _cacheQuota(connectionId, snapshot['quota']);
-        final selected = state.selectedSessionId;
-        if (selected != null) {
-          markSessionDirty(selected, connectionId: connectionId);
+    try {
+      if (topic == 'snapshot' && data is Map) {
+        for (final cache
+            in _sessionCaches[connectionId]?.values ??
+                const <_SessionMemoryCache>[]) {
+          cache.dirty = true;
         }
+        if (connectionId == state.activeConnectionId) {
+          final snapshot = data.cast<String, dynamic>();
+          state = state.copyWith(snapshot: snapshot);
+          _cacheQuota(connectionId, snapshot['quota']);
+          final selected = state.selectedSessionId;
+          if (selected != null) {
+            markSessionDirty(selected, connectionId: connectionId);
+          }
+        }
+        return;
       }
-      return;
+      _applySessionEvent(connectionId, topic, data);
+      if (connectionId != state.activeConnectionId) return;
+      _refreshTimer?.cancel();
+      _refreshTimer = Timer(const Duration(milliseconds: 120), () async {
+        await refresh();
+      });
+    } catch (error) {
+      _connectionLog(connectionId, 'event.failed', 'error', '$topic: $error');
     }
-    _applySessionEvent(connectionId, topic, data);
-    if (connectionId != state.activeConnectionId) return;
-    _refreshTimer?.cancel();
-    _refreshTimer = Timer(const Duration(milliseconds: 120), () async {
-      await refresh();
-    });
   }
 
   void _applySessionEvent(String connectionId, String topic, dynamic data) {
