@@ -85,6 +85,7 @@ const AUTH_FLOW_TTL: Duration = Duration::from_secs(10 * 60);
 const AUTH_CACHE_TTL: Duration = Duration::from_secs(30);
 const AGY_MODELS_TIMEOUT: Duration = Duration::from_secs(12);
 const AGY_VERSION_TIMEOUT: Duration = Duration::from_secs(3);
+const AGY_TURN_START_TIMEOUT: Duration = Duration::from_secs(60);
 type AuthSessions = Arc<Mutex<HashMap<String, AgyAuthSession>>>;
 
 struct CachedAuth {
@@ -732,7 +733,7 @@ impl AgentProvider for AgyProvider {
             }
             if let Some(m) = request.model.as_deref() {
                 cmd.arg("--model");
-                cmd.arg(m);
+                cmd.arg(model_id(m));
             }
             if let Some(m) = request.mode.as_deref() {
                 cmd.arg("--mode");
@@ -774,6 +775,8 @@ impl AgentProvider for AgyProvider {
             let monitor_stopped = monitor_stop.clone();
             let completion_confirmed = Arc::new(AtomicBool::new(false));
             let monitor_completion_confirmed = completion_confirmed.clone();
+            let start_timed_out = Arc::new(AtomicBool::new(false));
+            let monitor_start_timed_out = start_timed_out.clone();
             let monitor_agent = agent.clone();
             let monitor_conversation_id = request.conversation_id.clone();
             let monitor_events = request.on_event.clone();
@@ -781,6 +784,8 @@ impl AgentProvider for AgyProvider {
                 let mut emitted_events = HashSet::new();
                 let mut emitted_text = String::new();
                 let mut completion_tracker = TurnCompletionTracker::default();
+                let started_at = Instant::now();
+                let mut turn_started = false;
                 while !monitor_stopped.load(Ordering::Relaxed) {
                     let conversation_path = monitor_conversation_id
                         .as_deref()
@@ -797,6 +802,7 @@ impl AgentProvider for AgyProvider {
                             for mut event in events.into_iter().filter(|event| {
                                 event["index"].as_i64().unwrap_or(-1) > baseline_step
                             }) {
+                                turn_started = true;
                                 if let Ok(running_agent) = monitor_agent.lock() {
                                     apply_stopped_task_status(
                                         &mut event,
@@ -856,6 +862,13 @@ impl AgentProvider for AgyProvider {
                             break;
                         }
                     }
+                    if !turn_started && started_at.elapsed() >= AGY_TURN_START_TIMEOUT {
+                        monitor_start_timed_out.store(true, Ordering::Relaxed);
+                        if let Ok(mut running_agent) = monitor_agent.lock() {
+                            let _ = running_agent.killer.kill();
+                        }
+                        break;
+                    }
                     std::thread::sleep(Duration::from_millis(200));
                 }
             });
@@ -912,6 +925,12 @@ impl AgentProvider for AgyProvider {
                 )
             };
             running.lock().unwrap().remove(&session_id);
+            if start_timed_out.load(Ordering::Relaxed) {
+                bail!(
+                    "agy did not start the turn within {} seconds; verify authentication and model selection",
+                    AGY_TURN_START_TIMEOUT.as_secs()
+                )
+            }
             if !status.success() && !completion_confirmed.load(Ordering::Relaxed) {
                 bail!(
                     "agy exited with status {status:?}: {}",
@@ -1106,8 +1125,21 @@ fn parse_models(output: &str) -> Vec<Value> {
         .lines()
         .map(str::trim)
         .filter(|line| !line.is_empty())
-        .map(|model| json!({"id": model, "name": model}))
+        .map(|model| {
+            let (id, name) = model
+                .split_once('\t')
+                .map(|(id, name)| (id.trim(), name.trim()))
+                .unwrap_or((model, model));
+            json!({"id": id, "name": if name.is_empty() { id } else { name }})
+        })
         .collect()
+}
+
+fn model_id(model: &str) -> &str {
+    model
+        .split_once('\t')
+        .map(|(id, _)| id.trim())
+        .unwrap_or_else(|| model.trim())
 }
 
 fn command_output_with_timeout(command: &mut Command, timeout: Duration) -> Result<Output> {
@@ -2283,11 +2315,15 @@ mod tests {
     #[test]
     fn parses_models_reported_by_agy() {
         assert_eq!(
-            parse_models("gemini-3.6-flash-high\n\nclaude-sonnet-4-6\n"),
+            parse_models("gemini-3.6-flash-high\tGemini 3.6 Flash (High)\n\nclaude-sonnet-4-6\n"),
             vec![
-                json!({"id":"gemini-3.6-flash-high","name":"gemini-3.6-flash-high"}),
+                json!({"id":"gemini-3.6-flash-high","name":"Gemini 3.6 Flash (High)"}),
                 json!({"id":"claude-sonnet-4-6","name":"claude-sonnet-4-6"}),
             ]
+        );
+        assert_eq!(
+            model_id("gemini-3.6-flash-high\tGemini 3.6 Flash (High)"),
+            "gemini-3.6-flash-high"
         );
     }
 
