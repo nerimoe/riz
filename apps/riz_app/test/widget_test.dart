@@ -237,6 +237,41 @@ class _DraftController extends _ProjectOnlyController {
   );
 }
 
+class _DefaultModelController extends _DraftController {
+  @override
+  RizState build() => super.build().copyWith(
+    settings: const RizSettings(defaultModel: 'gemini-2.5-pro'),
+  );
+}
+
+class _SessionWithModelController extends _ResponsiveController {
+  @override
+  RizState build() => super.build().copyWith(
+    snapshot: {
+      'projects': [
+        {
+          'id': 'p1',
+          'name': 'Riz',
+          'runtimePath': '/Users/test/.riz/projects/p1/runtime',
+          'folders': [],
+        },
+      ],
+      'sessions': [
+        {
+          'id': 's1',
+          'projectId': 'p1',
+          'title': 'Responsive session',
+          'status': 'completed',
+          'model': 'claude-3-7-sonnet',
+          'permissionMode': 'workspace',
+          'workspacePath': '/Users/test/.riz/sessions/s1',
+          'archivedAt': null,
+        },
+      ],
+    },
+  );
+}
+
 class _DelayedModelsController extends _DraftController {
   final models = Completer<Map<String, dynamic>>();
   var modelRequests = 0;
@@ -515,6 +550,36 @@ void main() {
     expect(find.text('Default model'), findsOneWidget);
   });
 
+  testWidgets('draft chat displays global default model when configured', (
+    tester,
+  ) async {
+    await tester.pumpWidget(
+      ProviderScope(
+        overrides: [
+          appControllerProvider.overrideWith(_DefaultModelController.new),
+        ],
+        child: const MaterialApp(home: RizHome()),
+      ),
+    );
+    await tester.pump();
+    expect(find.text('Default (gemini-2.5-pro)'), findsOneWidget);
+  });
+
+  testWidgets('active chat displays and restores persisted session model', (
+    tester,
+  ) async {
+    await tester.pumpWidget(
+      ProviderScope(
+        overrides: [
+          appControllerProvider.overrideWith(_SessionWithModelController.new),
+        ],
+        child: const MaterialApp(home: RizHome()),
+      ),
+    );
+    await tester.pump();
+    expect(find.text('claude-3-7-sonnet'), findsOneWidget);
+  });
+
   testWidgets('chat shows Antigravity sign-in when provider auth is required', (
     tester,
   ) async {
@@ -638,6 +703,10 @@ void main() {
     testWidgets('project chat has no layout exceptions at ${width.toInt()}px', (
       tester,
     ) async {
+      tester.view.devicePixelRatio = 1;
+      tester.view.physicalSize = Size(width, 900);
+      addTearDown(tester.view.resetDevicePixelRatio);
+      addTearDown(tester.view.resetPhysicalSize);
       await tester.binding.setSurfaceSize(Size(width, 900));
       addTearDown(() => tester.binding.setSurfaceSize(null));
       await tester.pumpWidget(

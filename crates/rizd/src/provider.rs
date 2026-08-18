@@ -1318,17 +1318,7 @@ fn read_structured_events(path: &Path) -> Result<Vec<Value>> {
 }
 
 fn read_transcript_events(conversation_path: &Path) -> Result<Vec<Value>> {
-    let id = conversation_path
-        .file_stem()
-        .context("conversation has no id")?;
-    let root = conversation_path
-        .parent()
-        .and_then(Path::parent)
-        .context("conversation has no provider root")?;
-    let transcript = root
-        .join("brain")
-        .join(id)
-        .join(".system_generated/logs/transcript.jsonl");
+    let transcript = transcript_path(conversation_path)?;
     let contents = fs::read_to_string(transcript)?;
     let rows = contents
         .lines()
@@ -2043,6 +2033,13 @@ fn transcript_path(conversation_path: &Path) -> Result<PathBuf> {
         .parent()
         .and_then(Path::parent)
         .context("conversation has no provider root")?;
+    let full = root
+        .join("brain")
+        .join(id)
+        .join(".system_generated/logs/transcript_full.jsonl");
+    if full.exists() {
+        return Ok(full);
+    }
     Ok(root
         .join("brain")
         .join(id)
@@ -2748,5 +2745,34 @@ Quota available
             temp.path(),
             &[additional.path().to_owned()]
         ));
+    }
+
+    #[test]
+    fn prefers_untruncated_full_transcript_when_present() {
+        let temp = tempfile::tempdir().unwrap();
+        let conversation = temp.path().join("conversations/test.db");
+        fs::create_dir_all(conversation.parent().unwrap()).unwrap();
+        fs::write(&conversation, b"").unwrap();
+
+        let logs_dir = temp.path().join("brain/test/.system_generated/logs");
+        fs::create_dir_all(&logs_dir).unwrap();
+
+        let truncated_log = logs_dir.join("transcript.jsonl");
+        fs::write(
+            &truncated_log,
+            r#"{"step_index":1,"source":"MODEL","type":"PLANNER_RESPONSE","status":"DONE","content":"<truncated 100 bytes>"}"#,
+        )
+        .unwrap();
+
+        let full_log = logs_dir.join("transcript_full.jsonl");
+        fs::write(
+            &full_log,
+            r#"{"step_index":1,"source":"MODEL","type":"PLANNER_RESPONSE","status":"DONE","content":"Full untruncated model message here"}"#,
+        )
+        .unwrap();
+
+        let events = read_transcript_events(&conversation).unwrap();
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0]["text"], "Full untruncated model message here");
     }
 }

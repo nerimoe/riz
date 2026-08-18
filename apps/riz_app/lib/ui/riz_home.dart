@@ -133,13 +133,16 @@ class _Shell extends ConsumerWidget {
       3 => const _SettingsView(),
       _ => const _ProjectsView(),
     };
-    final wide = MediaQuery.sizeOf(context).width >= 840;
+    final wide = context.isExpanded;
     if (wide) {
+      final sidebarWidth = MediaQuery.sizeOf(context).width < 840
+          ? 240.0
+          : 272.0;
       return Scaffold(
         body: Row(
           children: [
             SizedBox(
-              width: 272,
+              width: sidebarWidth,
               child: _ProjectTreeSidebar(
                 projects: state.projects,
                 selected: state.selectedProjectId,
@@ -196,6 +199,14 @@ class _Shell extends ConsumerWidget {
           ],
         ),
         actions: [
+          if (state.navigationIndex == 0 && state.activeSession != null)
+            Builder(
+              builder: (drawerContext) => IconButton(
+                tooltip: tr(context, '打开侧边栏', 'Open drawer'),
+                onPressed: () => Scaffold.of(drawerContext).openDrawer(),
+                icon: const Icon(Icons.menu),
+              ),
+            ),
           IconButton(
             tooltip: state.connected
                 ? tr(context, '刷新', 'Refresh')
@@ -1609,7 +1620,7 @@ class _ProjectWorkspaceState extends ConsumerState<_ProjectWorkspace>
     ];
     return Column(
       children: [
-        if (context.isExpanded)
+        if (context.isWide)
           Material(
             color: context.colors.surfaceContainerLow,
             child: Row(
@@ -2038,6 +2049,10 @@ class _ChatViewState extends ConsumerState<_ChatView> {
         Overlay.of(context).context.findRenderObject() as RenderBox?;
     if (anchor == null || overlay == null) return;
     final offset = anchor.localToGlobal(Offset.zero, ancestor: overlay);
+    final defaultModel = ref.read(appControllerProvider).settings.defaultModel;
+    final defaultLabel = defaultModel == null
+        ? tr(context, '默认模型', 'Default model')
+        : tr(context, '默认 ($defaultModel)', 'Default ($defaultModel)');
     final selection = await showMenu<String>(
       context: context,
       initialValue: selectedModel ?? '',
@@ -2049,7 +2064,7 @@ class _ChatViewState extends ConsumerState<_ChatView> {
         CheckedPopupMenuItem(
           value: '',
           checked: selectedModel == null,
-          child: Text(tr(context, '默认模型', 'Default model')),
+          child: Text(defaultLabel),
         ),
         for (final model in models)
           CheckedPopupMenuItem(
@@ -2078,7 +2093,15 @@ class _ChatViewState extends ConsumerState<_ChatView> {
       if (anchorContext.mounted) await openModelMenu(anchorContext);
       return;
     }
-    setState(() => selectedModel = selection.isEmpty ? null : selection);
+    final newModel = selection.isEmpty ? null : selection;
+    setState(() => selectedModel = newModel);
+    final activeSession = ref.read(appControllerProvider).activeSession;
+    final sessionId = activeSession?['id']?.toString();
+    if (sessionId != null) {
+      await ref
+          .read(appControllerProvider.notifier)
+          .setSessionModel(sessionId, newModel);
+    }
   }
 
   @override
@@ -2164,7 +2187,7 @@ class _ChatViewState extends ConsumerState<_ChatView> {
     final session = state.activeSession!;
     if (optionSessionId != session['id']) {
       optionSessionId = session['id'] as String;
-      selectedModel = null;
+      selectedModel = session['model']?.toString();
       delivery = 'steer';
     }
     final globals = state.activeDaemonGlobals ?? const DaemonGlobalData();
@@ -2505,65 +2528,75 @@ class _ChatViewState extends ConsumerState<_ChatView> {
                               ),
                             ],
                           ),
-                          Builder(
-                            builder: (buttonContext) => Tooltip(
-                              message:
-                                  selectedModel ??
-                                  tr(context, '默认模型', 'Default model'),
-                              child: InkWell(
-                                borderRadius: BorderRadius.circular(8),
-                                onTap: () => openModelMenu(buttonContext),
-                                child: ConstrainedBox(
-                                  constraints: const BoxConstraints(
-                                    maxWidth: 190,
-                                    minHeight: 48,
-                                  ),
-                                  child: Padding(
-                                    padding: const EdgeInsets.symmetric(
-                                      horizontal: 8,
-                                    ),
-                                    child: Row(
-                                      mainAxisSize: MainAxisSize.min,
-                                      children: [
-                                        Icon(
-                                          selectedModel == null
-                                              ? Icons.model_training_outlined
-                                              : Icons.model_training,
-                                          size: 20,
+                          Flexible(
+                            child: Builder(
+                              builder: (buttonContext) {
+                                final defaultModel =
+                                    state.settings.defaultModel;
+                                final defaultLabel = defaultModel == null
+                                    ? tr(context, '默认模型', 'Default model')
+                                    : tr(
+                                        context,
+                                        '默认 ($defaultModel)',
+                                        'Default ($defaultModel)',
+                                      );
+                                final displayModel =
+                                    selectedModel ?? defaultLabel;
+                                return Tooltip(
+                                  message: displayModel,
+                                  child: InkWell(
+                                    borderRadius: BorderRadius.circular(8),
+                                    onTap: () => openModelMenu(buttonContext),
+                                    child: ConstrainedBox(
+                                      constraints: const BoxConstraints(
+                                        maxWidth: 120,
+                                        minHeight: 40,
+                                      ),
+                                      child: Padding(
+                                        padding: const EdgeInsets.symmetric(
+                                          horizontal: 4,
                                         ),
-                                        const SizedBox(width: 6),
-                                        Flexible(
-                                          child: Text(
-                                            selectedModel ??
-                                                tr(
-                                                  context,
-                                                  '默认模型',
-                                                  'Default model',
-                                                ),
-                                            maxLines: 1,
-                                            overflow: TextOverflow.ellipsis,
-                                            style: context.text.labelMedium,
-                                          ),
-                                        ),
-                                        const SizedBox(width: 4),
-                                        if (globals.loading &&
-                                            globals.models.isEmpty)
-                                          const SizedBox.square(
-                                            dimension: 14,
-                                            child: CircularProgressIndicator(
-                                              strokeWidth: 2,
+                                        child: Row(
+                                          mainAxisSize: MainAxisSize.min,
+                                          children: [
+                                            Icon(
+                                              selectedModel == null
+                                                  ? Icons
+                                                        .model_training_outlined
+                                                  : Icons.model_training,
+                                              size: 18,
                                             ),
-                                          )
-                                        else
-                                          const Icon(
-                                            Icons.arrow_drop_down,
-                                            size: 18,
-                                          ),
-                                      ],
+                                            const SizedBox(width: 4),
+                                            Flexible(
+                                              child: Text(
+                                                displayModel,
+                                                maxLines: 1,
+                                                overflow: TextOverflow.ellipsis,
+                                                style: context.text.labelMedium,
+                                              ),
+                                            ),
+                                            const SizedBox(width: 2),
+                                            if (globals.loading &&
+                                                globals.models.isEmpty)
+                                              const SizedBox.square(
+                                                dimension: 14,
+                                                child:
+                                                    CircularProgressIndicator(
+                                                      strokeWidth: 2,
+                                                    ),
+                                              )
+                                            else
+                                              const Icon(
+                                                Icons.arrow_drop_down,
+                                                size: 16,
+                                              ),
+                                          ],
+                                        ),
+                                      ),
                                     ),
                                   ),
-                                ),
-                              ),
+                                );
+                              },
                             ),
                           ),
                           const Spacer(),
@@ -2575,7 +2608,8 @@ class _ChatViewState extends ConsumerState<_ChatView> {
                                   setState(() => delivery = value),
                               child: Padding(
                                 padding: const EdgeInsets.symmetric(
-                                  horizontal: 8,
+                                  horizontal: 4,
+                                  vertical: 4,
                                 ),
                                 child: Row(
                                   mainAxisSize: MainAxisSize.min,
@@ -5475,6 +5509,41 @@ class _SettingsViewState extends ConsumerState<_SettingsView> {
                       icon: const Icon(Icons.login),
                       label: Text(tr(context, '登录', 'Sign in')),
                     ),
+            ),
+          if (active != null)
+            ListTile(
+              leading: const Icon(Icons.model_training_outlined),
+              title: Text(tr(context, '默认模型', 'Default model')),
+              subtitle: Text(
+                state.settings.defaultModel != null
+                    ? state.settings.defaultModel!
+                    : tr(context, '使用 Provider 默认', 'Use provider default'),
+              ),
+              trailing: DropdownButton<String>(
+                value: state.settings.defaultModel ?? '',
+                onChanged: (v) => ctl.updateDefaultModel(v == '' ? null : v),
+                items: [
+                  DropdownMenuItem(
+                    value: '',
+                    child: Text(tr(context, 'Provider 默认', 'Provider default')),
+                  ),
+                  for (final model
+                      in state.activeDaemonGlobals?.models ??
+                          const <Map<String, dynamic>>[])
+                    DropdownMenuItem(
+                      value: model['id'] as String,
+                      child: Text(model['name'] as String),
+                    ),
+                  if (state.settings.defaultModel != null &&
+                      !(state.activeDaemonGlobals?.models ?? const []).any(
+                        (m) => m['id'] == state.settings.defaultModel,
+                      ))
+                    DropdownMenuItem(
+                      value: state.settings.defaultModel!,
+                      child: Text(state.settings.defaultModel!),
+                    ),
+                ],
+              ),
             ),
           if (active != null)
             ListTile(

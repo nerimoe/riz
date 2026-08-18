@@ -35,6 +35,7 @@ class AppController extends Notifier<RizState> {
   static const _activeKey = 'riz.activeConnection';
   static const _themeKey = 'riz.theme';
   static const _localeKey = 'riz.locale';
+  static const _defaultModelKey = 'riz.defaultModel';
   final _secure = const FlutterSecureStorage();
   final _clients = <String, DaemonClient>{};
   final _reconnectTimers = <String, Timer>{};
@@ -76,12 +77,14 @@ class AppController extends Notifier<RizState> {
               .toList();
     final themeName = prefs.getString(_themeKey) ?? 'system';
     final localeName = prefs.getString(_localeKey);
+    final defaultModel = prefs.getString(_defaultModelKey);
     final settings = RizSettings(
       themeMode: ThemeMode.values.firstWhere(
         (v) => v.name == themeName,
         orElse: () => ThemeMode.system,
       ),
       locale: localeName == null ? null : Locale(localeName),
+      defaultModel: defaultModel,
     );
     final active = prefs.getString(_activeKey) ?? connections.firstOrNull?.id;
     state = state.copyWith(
@@ -902,11 +905,14 @@ class AppController extends Notifier<RizState> {
     Map<String, dynamic>? materializedSession;
     final draft = state.draftSession;
     if (draft != null) {
+      final initialModel =
+          model ?? draft['model']?.toString() ?? state.settings.defaultModel;
       final session = await request('session.create', {
         'projectId': ?draft['projectId'],
         'title': draft['title'],
         'provider': draft['provider'] ?? 'agy',
         'permissionMode': draft['permissionMode'] ?? 'workspace',
+        'model': ?initialModel,
       });
       materializedSession = session;
       id = session['id'] as String;
@@ -936,13 +942,15 @@ class AppController extends Notifier<RizState> {
           'mimeType': attachment['mimeType'],
         });
       }
+      final effectiveModel =
+          model ?? session?['model']?.toString() ?? state.settings.defaultModel;
       await request('session.send', {
         'sessionId': id,
         'delivery': mode,
         'content': {
           'text': text.trim(),
           'attachments': remoteAttachments,
-          'model': ?model,
+          'model': ?effectiveModel,
         },
       });
       markSessionDirty(id);
@@ -1063,6 +1071,45 @@ class AppController extends Notifier<RizState> {
         systemLocale: locale == null,
       ),
     );
+  }
+
+  Future<void> updateDefaultModel(String? model) async {
+    final prefs = await SharedPreferences.getInstance();
+    if (model == null || model.isEmpty) {
+      await prefs.remove(_defaultModelKey);
+      state = state.copyWith(
+        settings: state.settings.copyWith(clearDefaultModel: true),
+      );
+    } else {
+      await prefs.setString(_defaultModelKey, model);
+      state = state.copyWith(
+        settings: state.settings.copyWith(defaultModel: model),
+      );
+    }
+  }
+
+  Future<void> setSessionModel(String id, String? model) async {
+    if (state.isDraftSession) {
+      final draft = state.draftSession;
+      if (draft != null) {
+        state = state.copyWith(
+          draftSession: {
+            ...draft,
+            if (model != null) 'model': model else ...{'model': null},
+          },
+        );
+      }
+      return;
+    }
+    final session = await request('session.model.set', {
+      'sessionId': id,
+      'model': ?model,
+    });
+    final snapshot = {...state.snapshot};
+    snapshot['sessions'] = state.sessions
+        .map((item) => item['id'] == id ? session : item)
+        .toList();
+    state = state.copyWith(snapshot: snapshot, clearError: true);
   }
 
   void attachTerminal(String id, void Function(Uint8List) listener) =>

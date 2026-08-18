@@ -79,6 +79,10 @@ extension BuildContextX on BuildContext {
   ColorScheme get colors => theme.colorScheme;
   TextTheme get text => theme.textTheme;
   bool get isCompact => MediaQuery.sizeOf(this).width < 600;
-  bool get isExpanded => MediaQuery.sizeOf(this).width >= 840;
+  bool get isExpanded {
+    final size = MediaQuery.sizeOf(this);
+    return size.width >= 840 || (size.width >= 600 && size.width > size.height);
+  }
+
   bool get isWide => MediaQuery.sizeOf(this).width >= 1200;
 }

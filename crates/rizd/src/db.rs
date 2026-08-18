@@ -348,6 +348,28 @@ impl Database {
         permission_mode: &str,
         session_root: &Path,
     ) -> Result<Value> {
+        self.create_session_with_details(
+            project_id,
+            title,
+            provider,
+            external_id,
+            permission_mode,
+            None,
+            session_root,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn create_session_with_details(
+        &self,
+        project_id: Option<&str>,
+        title: Option<&str>,
+        provider: &str,
+        external_id: Option<&str>,
+        permission_mode: &str,
+        model: Option<&str>,
+        session_root: &Path,
+    ) -> Result<Value> {
         if let Some(project_id) = project_id
             && self.project(project_id)?.is_none()
         {
@@ -363,7 +385,10 @@ impl Database {
         ensure_runtime_directory(&Path::new(&workspace_path).join("runtime"))?;
         std::fs::create_dir_all(Path::new(&workspace_path).join("attachments"))?;
         std::fs::create_dir_all(Path::new(&workspace_path).join("artifacts"))?;
-        self.conn().execute("INSERT INTO sessions(id,project_id,provider,external_id,workspace_path,title,status,created_at,updated_at,permission_mode) VALUES(?1,?2,?3,NULL,?4,?5,'completed',?6,?6,?7)",params![id,project_id,provider,workspace_path,title,timestamp,permission_mode])?;
+        self.conn().execute(
+            "INSERT INTO sessions(id,project_id,provider,external_id,workspace_path,title,status,created_at,updated_at,permission_mode,model) VALUES(?1,?2,?3,NULL,?4,?5,'completed',?6,?6,?7,?8)",
+            params![id, project_id, provider, workspace_path, title, timestamp, permission_mode, model],
+        )?;
         if let Some(external_id) = external_id {
             let context = self.execution_context(&id)?;
             self.set_external_id(
@@ -377,13 +402,31 @@ impl Database {
         self.session(&id)?.context("created session missing")
     }
 
+    pub fn set_session_model(&self, id: &str, model: Option<&str>) -> Result<Value> {
+        let changed = self.conn().execute(
+            "UPDATE sessions SET model=?2,updated_at=?3 WHERE id=?1",
+            params![id, model, now()],
+        )?;
+        if changed == 0 {
+            bail!("session not found");
+        }
+        self.session(id)?.context("session not found")
+    }
+
     pub fn session(&self, id: &str) -> Result<Option<Value>> {
-        self.conn().query_row("SELECT id,project_id,provider,external_id,workspace_path,title,status,archived_at,created_at,updated_at,permission_mode FROM sessions WHERE id=?1",[id],row_session).optional().map_err(Into::into)
+        self.conn()
+            .query_row(
+                "SELECT id,project_id,provider,external_id,workspace_path,title,status,archived_at,created_at,updated_at,permission_mode,model FROM sessions WHERE id=?1",
+                [id],
+                row_session,
+            )
+            .optional()
+            .map_err(Into::into)
     }
 
     pub fn sessions(&self, project_id: Option<&str>, include_archived: bool) -> Result<Vec<Value>> {
         let conn = self.conn();
-        let sql = "SELECT id,project_id,provider,external_id,workspace_path,title,status,archived_at,created_at,updated_at,permission_mode FROM sessions WHERE (?1 IS NULL OR project_id=?1) AND (?2=1 OR archived_at IS NULL) ORDER BY updated_at DESC";
+        let sql = "SELECT id,project_id,provider,external_id,workspace_path,title,status,archived_at,created_at,updated_at,permission_mode,model FROM sessions WHERE (?1 IS NULL OR project_id=?1) AND (?2=1 OR archived_at IS NULL) ORDER BY updated_at DESC";
         let mut s = conn.prepare(sql)?;
         Ok(
             s.query_map(params![project_id, include_archived], row_session)?
@@ -1028,6 +1071,7 @@ fn row_session(r: &rusqlite::Row<'_>) -> rusqlite::Result<Value> {
         "createdAt":r.get::<_,String>(8)?,
         "updatedAt":r.get::<_,String>(9)?,
         "permissionMode":r.get::<_,String>(10)?,
+        "model":r.get::<_,Option<String>>(11)?,
     }))
 }
 
@@ -1080,7 +1124,7 @@ fn now() -> String {
 const SCHEMA_V4: &str = r#"
 CREATE TABLE IF NOT EXISTS projects(id TEXT PRIMARY KEY,custom_name TEXT,created_at TEXT NOT NULL,updated_at TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS project_folders(id TEXT PRIMARY KEY,project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,path TEXT NOT NULL,position INTEGER NOT NULL,created_at TEXT NOT NULL,UNIQUE(project_id,path));
-CREATE TABLE IF NOT EXISTS sessions(id TEXT PRIMARY KEY,project_id TEXT REFERENCES projects(id) ON DELETE SET NULL,provider TEXT NOT NULL,external_id TEXT,workspace_path TEXT NOT NULL UNIQUE,title TEXT NOT NULL,status TEXT NOT NULL,archived_at TEXT,created_at TEXT NOT NULL,updated_at TEXT NOT NULL,permission_mode TEXT NOT NULL DEFAULT 'workspace');
+CREATE TABLE IF NOT EXISTS sessions(id TEXT PRIMARY KEY,project_id TEXT REFERENCES projects(id) ON DELETE SET NULL,provider TEXT NOT NULL,external_id TEXT,workspace_path TEXT NOT NULL UNIQUE,title TEXT NOT NULL,status TEXT NOT NULL,archived_at TEXT,created_at TEXT NOT NULL,updated_at TEXT NOT NULL,permission_mode TEXT NOT NULL DEFAULT 'workspace',model TEXT);
 CREATE INDEX IF NOT EXISTS sessions_project_updated ON sessions(project_id,archived_at,updated_at DESC);
 CREATE TABLE IF NOT EXISTS session_provider_conversations(id TEXT PRIMARY KEY,session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,provider TEXT NOT NULL,external_id TEXT NOT NULL,provider_workspace_id TEXT,cwd_snapshot TEXT NOT NULL,additional_directories_snapshot TEXT NOT NULL,status TEXT NOT NULL,created_at TEXT NOT NULL,ended_at TEXT,end_reason TEXT,UNIQUE(session_id,provider,external_id));
 CREATE UNIQUE INDEX IF NOT EXISTS session_one_active_provider_conversation ON session_provider_conversations(session_id,provider) WHERE status='active';
@@ -1139,6 +1183,14 @@ fn initialize_schema(conn: &Connection) -> Result<()> {
         }
     }
     conn.execute_batch(SCHEMA_V4)?;
+    let has_model: bool = conn.query_row(
+        "SELECT COUNT(*) > 0 FROM pragma_table_info('sessions') WHERE name='model'",
+        [],
+        |r| r.get(0),
+    )?;
+    if !has_model {
+        conn.execute("ALTER TABLE sessions ADD COLUMN model TEXT", [])?;
+    }
     conn.pragma_update(None, "user_version", 4)?;
     Ok(())
 }
@@ -1807,5 +1859,39 @@ mod tests {
         assert_eq!(sources[0]["enabled"], false);
         db.remove_skill_source(&path).unwrap();
         assert!(db.skill_sources().unwrap().is_empty());
+    }
+
+    #[test]
+    fn session_model_can_be_set_and_persisted() {
+        let directory = tempfile::tempdir().unwrap();
+        let db = Database::open(&directory.path().join("riz.db")).unwrap();
+        let session = db
+            .create_session_with_details(
+                None,
+                Some("Test session"),
+                "agy",
+                None,
+                "workspace",
+                Some("gemini-3.7-flash"),
+                &directory.path().join("sessions"),
+            )
+            .unwrap();
+        assert_eq!(session["model"], "gemini-3.7-flash");
+
+        let updated = db
+            .set_session_model(session["id"].as_str().unwrap(), Some("gemini-3.7-pro"))
+            .unwrap();
+        assert_eq!(updated["model"], "gemini-3.7-pro");
+
+        let retrieved = db
+            .session(session["id"].as_str().unwrap())
+            .unwrap()
+            .unwrap();
+        assert_eq!(retrieved["model"], "gemini-3.7-pro");
+
+        let cleared = db
+            .set_session_model(session["id"].as_str().unwrap(), None)
+            .unwrap();
+        assert!(cleared["model"].is_null());
     }
 }

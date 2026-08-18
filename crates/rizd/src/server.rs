@@ -281,12 +281,13 @@ async fn dispatch(state: &AppState, request: &Envelope) -> Result<Value> {
         }
         "session.create" => {
             let project_id = p["projectId"].as_str();
-            let s = state.db.create_session_with_permission(
+            let s = state.db.create_session_with_details(
                 project_id,
                 p["title"].as_str(),
                 p["provider"].as_str().unwrap_or("agy"),
                 None,
                 p["permissionMode"].as_str().unwrap_or("workspace"),
+                p["model"].as_str(),
                 &data_dir().join("sessions"),
             )?;
             state.emit("session.changed", s.clone())?;
@@ -325,9 +326,22 @@ async fn dispatch(state: &AppState, request: &Envelope) -> Result<Value> {
             state.emit("session.changed", session.clone())?;
             Ok(session)
         }
+        "session.model.set" | "session.set_model" => {
+            let id = str_param(p, "sessionId")?;
+            let model = p["model"].as_str();
+            let session = state.db.set_session_model(id, model)?;
+            state.emit("session.changed", session.clone())?;
+            Ok(session)
+        }
         "session.send" => {
             let id = str_param(p, "sessionId")?;
             let content = p["content"].clone();
+            if let Some(model) = content["model"].as_str() {
+                let _ = state.db.set_session_model(id, Some(model));
+                if let Some(session) = state.db.session(id)? {
+                    state.emit("session.changed", session)?;
+                }
+            }
             for attachment in content["attachments"].as_array().into_iter().flatten() {
                 state.db.save_attachment(
                     id,
@@ -870,7 +884,10 @@ fn start_worker(state: AppState, session_id: String) {
                         .ok()
                         .flatten()
                 },
-                model: content["model"].as_str().map(str::to_owned),
+                model: content["model"]
+                    .as_str()
+                    .or_else(|| session["model"].as_str())
+                    .map(str::to_owned),
                 mode: content["mode"].as_str().map(str::to_owned),
                 permission_mode: session["permissionMode"]
                     .as_str()
@@ -1281,7 +1298,8 @@ fn terminal_frame(id: Uuid, data: &[u8]) -> Vec<u8> {
 #[cfg(test)]
 mod tests {
     use super::{
-        MAX_INITIAL_EVENT_REPLAY, quota_markdown, router, session_title, upsert_runtime_event,
+        MAX_INITIAL_EVENT_REPLAY, dispatch, quota_markdown, router, session_title,
+        upsert_runtime_event,
     };
     use crate::{
         config::{Config, hash_token},
@@ -1594,5 +1612,54 @@ mod tests {
         );
         assert_eq!(events.len(), 1);
         assert_eq!(events[0]["status"], "DONE");
+    }
+
+    #[tokio::test]
+    async fn session_model_set_rpc_updates_and_emits_session_change() {
+        let temp = tempfile::tempdir().unwrap();
+        let db = Database::open(&temp.path().join("riz.db")).unwrap();
+        let session = db
+            .create_session(
+                None,
+                Some("Test"),
+                "agy",
+                None,
+                &temp.path().join("sessions"),
+            )
+            .unwrap();
+        let session_id = session["id"].as_str().unwrap();
+
+        let state = AppState::new(
+            Config {
+                daemon_id: Uuid::new_v4(),
+                name: "Test daemon".into(),
+                listen: "127.0.0.1:0".parse().unwrap(),
+                token_hash: hash_token("secret"),
+                issued_tokens: Vec::new(),
+                relay: None,
+            },
+            db.clone(),
+        );
+
+        let req = Envelope {
+            v: PROTOCOL_VERSION,
+            kind: "request".into(),
+            request_id: Some("1".into()),
+            daemon_id: None,
+            seq: None,
+            payload: json!({
+                "method": "session.model.set",
+                "params": {
+                    "sessionId": session_id,
+                    "model": "gemini-3.7-pro"
+                }
+            }),
+            error: None,
+        };
+        let res = dispatch(&state, &req).await.unwrap();
+        assert_eq!(res["model"], "gemini-3.7-pro");
+
+        let fetched = db.session(session_id).unwrap().unwrap();
+        assert_eq!(fetched["model"], "gemini-3.7-pro");
     }
 }

@@ -31,16 +31,24 @@ class DaemonConnection {
 }
 
 class RizSettings {
-  const RizSettings({this.themeMode = ThemeMode.system, this.locale});
+  const RizSettings({
+    this.themeMode = ThemeMode.system,
+    this.locale,
+    this.defaultModel,
+  });
   final ThemeMode themeMode;
   final Locale? locale;
+  final String? defaultModel;
   RizSettings copyWith({
     ThemeMode? themeMode,
     Locale? locale,
     bool systemLocale = false,
+    String? defaultModel,
+    bool clearDefaultModel = false,
   }) => RizSettings(
     themeMode: themeMode ?? this.themeMode,
     locale: systemLocale ? null : locale ?? this.locale,
+    defaultModel: clearDefaultModel ? null : defaultModel ?? this.defaultModel,
   );
 }
 
